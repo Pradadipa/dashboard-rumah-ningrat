@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 st.set_page_config(
-    page_title="Marktivo Growth OS",
+    page_title="Rumah Ningrat Dashboard",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -19,7 +19,7 @@ def load_css():
         pass
 
 def render_sidebar():
-    st.sidebar.title("MARKTIVO GROWTH OS")
+    st.sidebar.title("Rumah Ningrat Dashboard")
     st.sidebar.markdown("---")
 
     page = st.sidebar.radio(

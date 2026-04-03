@@ -1,5 +1,5 @@
-APP_NAME = "Marktivo Growth OS"
-VEERSION = "1.0.0"
+APP_NAME = "Rumah Ningrat Dashboard"
+VERSION = "1.0.0"
 
 # Color Scheme (Dark Mode)
 COLORS = {
