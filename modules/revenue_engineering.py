@@ -1,688 +1,651 @@
 """
-Module 1: Revenue Engineering - The Financial Terminal
-Funnel Breakdown + North Star Ribbon + Data Integrity Layer
+modules/revenue_engineering.py
+================================
+Module 1: Revenue Engineering — The Financial Terminal
+Disesuaikan untuk Lead Gen Property (bukan e-commerce).
+
+Sections:
+1. North Star Ribbon  — KPI utama per portfolio
+2. Campaign Terminal  — Funnel breakdown (TOF vs BOF)
+3. Context Graph      — Daily spend + CTR trend
+4. AI Insight         — Per section
 """
 
+import os
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go 
+import numpy as np
+import plotly.graph_objects as go
 import plotly.express as px
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from config.settings import COLORS, FUNNEL_STAGES, TARGETS
 from utils.data_loader import DataLoader
+from components.inline_insight import render_inline_insight
 
-def show_revenue_engineering():
-    """Main function - Module 1"""
+import re as _re
 
-    st.title("💰 REVENUE ENGINEERING")
-    st.markdown("### The Financial Terminal")
-    st.markdown("---")
+def _html(s: str):
+    """Minify dan render HTML — hapus newline supaya Streamlit tidak salah parse."""
+    s = _re.sub(r'>\s+<', '><', s)
+    s = _re.sub(r'\s+', ' ', s).strip()
+    st.markdown(s, unsafe_allow_html=True)
 
-    # Load Data
-    loader = DataLoader()
-    df = loader.load_revenue_data()
+
+# ══════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ══════════════════════════════════════════════════════════════════
+
+DARK_BG        = "#0E1117"
+CARD_BG        = "#1B1F2B"
+CARD_BORDER    = "#2D3348"
+NEON_BLUE      = "#00D4FF"
+NEON_GREEN     = "#00FF88"
+NEON_PURPLE    = "#A855F7"
+NEON_ORANGE    = "#FF6B35"
+NEON_RED       = "#FF3B5C"
+NEON_YELLOW    = "#FFD700"
+TEXT_PRIMARY   = "#FFFFFF"
+TEXT_SECONDARY = "#8892A0"
+
+FUNNEL_COLORS = {
+    'TOF'          : '#00D4FF',
+    'MOF'          : '#A855F7',
+    'BOF'          : '#FF6B35',
+    'RET'          : '#00FF88',
+    'UNCATEGORIZED': '#FF3B5C',
+}
+
+FUNNEL_LABELS = {
+    'TOF'          : 'Top of Funnel',
+    'MOF'          : 'Middle of Funnel',
+    'BOF'          : 'Bottom of Funnel',
+    'RET'          : 'Retention',
+    'UNCATEGORIZED': 'Uncategorized',
+}
+
+# ══════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════
+
+def fmt_idr(amount: float) -> str:
+    """Format angka ke IDR."""
+    if amount >= 1_000_000_000:
+        return f"Rp {amount/1_000_000_000:.1f}B"
+    elif amount >= 1_000_000:
+        return f"Rp {amount/1_000_000:.1f}M"
+    elif amount >= 1_000:
+        return f"Rp {amount/1_000:.1f}K"
+    return f"Rp {amount:,.0f}"
+
+def fmt_num(n: float) -> str:
+    if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+    if n >= 1_000    : return f"{n/1_000:.1f}K"
+    return str(int(n))
+
+def get_funnel_stage(campaign_name: str) -> str:
+    name = str(campaign_name).lower()
+    if 'awareness' in name:                       return 'TOF'
+    if 'leads' in name or 'lead' in name:         return 'BOF'
+    if 'retarget' in name or '|ret|' in name:     return 'RET'
+    if 'mof' in name or '|mof|' in name:          return 'MOF'
+    return 'UNCATEGORIZED'
+
+def prepare_ads_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean & enrich ads DataFrame."""
+    if df.empty:
+        return df
+    df = df.copy()
+
+    # ── Standardize column names (handle variations) ──────────────
+    col_map = {}
+    for col in df.columns:
+        col_lower = col.lower().strip()
+        if col_lower == 'campaign name'  : col_map[col] = 'campaign_name'
+        if col_lower == 'ad set name'    : col_map[col] = 'adset_name'
+        if col_lower == 'amount spent'   : col_map[col] = 'spend'
+        if col_lower == 'link clicks'    : col_map[col] = 'clicks'
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    # ── Ensure required columns exist ─────────────────────────────
+    required_defaults = {
+        'campaign_name': 'Unknown Campaign',
+        'portfolio'    : 'Unknown',
+        'impressions'  : 0,
+        'clicks'       : 0,
+        'spend'        : 0.0,
+        'cpm'          : 0.0,
+        'cpc'          : 0.0,
+        'ctr'          : 0.0,
+    }
+    for col, default in required_defaults.items():
+        if col not in df.columns:
+            df[col] = default
+
+    # ── Parse date ────────────────────────────────────────────────
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+    # ── Funnel stage dari campaign name ───────────────────────────
+    df['funnel_stage'] = df['campaign_name'].astype(str).apply(get_funnel_stage)
+
+    # ── Derived metrics (recalculate untuk akurasi) ───────────────
+    df['impressions'] = pd.to_numeric(df['impressions'], errors='coerce').fillna(0)
+    df['clicks']      = pd.to_numeric(df['clicks'],      errors='coerce').fillna(0)
+    df['spend']       = pd.to_numeric(df['spend'],       errors='coerce').fillna(0)
+
+    df['ctr_calc'] = df['clicks'] / df['impressions'].clip(lower=1) * 100
+    df['cpm_calc'] = df['spend']  / df['impressions'].clip(lower=1) * 1000
+    df['cpc_calc'] = df['spend']  / df['clicks'].clip(lower=1)
+
+    return df
+
+def _html(html_string: str):
+    """Render HTML - strip newlines supaya Streamlit tidak salah parse."""
+    import re
+    # Hapus newline dan spasi berlebih antar tag
+    clean = re.sub(r'>\s+<', '><', html_string)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    st.markdown(clean, unsafe_allow_html=True)
+
+def divider():
+    _html('<div style="height:1px;background:linear-gradient(to right,transparent,#2D3348,transparent);margin:28px 0;"></div>')
+
+def section_header(title: str):
+    st.markdown(
+        f'<div style="font-size:11px;font-weight:600;color:#8892A0;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:16px;">{title}</div>',
+        unsafe_allow_html=True
+    )
+
+# ══════════════════════════════════════════════════════════════════
+# SECTION 1: NORTH STAR RIBBON
+# ══════════════════════════════════════════════════════════════════
+
+def render_north_star(df: pd.DataFrame, portfolio: str):
+    """
+    North Star Ribbon — KPI utama.
+    Metrics: Total Spend, Impressions, Clicks, CTR, CPM, CPC, Top Campaign
+    """
+    section_header("North Star Ribbon — Key Performance Indicators")
 
     if df.empty:
-        st.error("❌ No data.")
+        st.info("Tidak ada data tersedia.")
         return
-    
-    # Data filter
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input(
-            "📅 Start Date",
-            value=df['date'].max() - timedelta(days=30)
-        )
-    with col2:
-        end_date = st.date_input(
-            "📅 End Date",
-            value=df['date'].max()
-        )
-    
-    # Filter by date
-    mask = (df['date'] >= pd.Timestamp(start_date)) & (df['date'] <= pd.Timestamp(end_date))
-    filtered_df = df[mask].copy()
 
-    # ========================================
-    # SECTION 1: DATA INTEGRITY - THE ENFORCER
-    # ========================================
-    show_data_integrity(filtered_df)
+    # Aggregate
+    total_spend       = df['spend'].sum()
+    total_impressions = df['impressions'].sum()
+    total_clicks      = df['clicks'].sum()
+    avg_ctr           = total_clicks / max(total_impressions, 1) * 100
+    avg_cpm           = total_spend  / max(total_impressions, 1) * 1000
+    avg_cpc           = total_spend  / max(total_clicks, 1)
 
-    # ========================================
-    # SECTION 2: NORTH STAR RIBBON
-    # ========================================
-    show_north_star(filtered_df)
-
-    # ========================================
-    # SECTION 3: MAIN TERMINAL - FUNNEL BREAKDOWN
-    # ========================================
-    show_main_terminal(filtered_df)
-
-    # ========================================
-    # SECTION 4: WELTH ENGINE - COHORT LTV
-    # =======================================
-    show_welth_engine(filtered_df)
-
-    # ========================================
-    # SECTION 5 : CONTEXT GRAPH - MER TIMELINE
-    # =======================================
-    show_context_graph(filtered_df)
-
-    # ========================================
-    # SECTION 6 : AI BRAIN LOGIC
-    # =======================================
-    show_ai_insights(filtered_df)
-
-def show_data_integrity(df):
-    """The Enforcer - Data Integrity Layer"""
-
-    uncategorized = df[df['funnel_stage'] == 'UNCATEGORIZED']
-
-    if not uncategorized.empty:
-        # Red Alert box
-        st.markdown(
-            f"""
-            <div style="
-                background-color: rgba(255, 0, 85, 0.15);
-                border: 2px solid #FF0055;
-                border-radius: 10px;
-                padding: 15px 20px;
-                margin-bottom: 20px;
-            ">
-                <h4 style="color: #FF0055; margin: 0;">
-                    ⚠️ UNCATEGORIZED SPEND — DATA INTEGRITY ALERT
-                </h4>
-                <p style="color: #FF0055; margin: 5px 0 0 0;">
-                    {len(uncategorized)} campaigns missing funnel tags (|TOF|, |MOF|, |BOF|, |RET|).
-                    Categorize these campaigns to validate data.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-        # Show uncategorized date
-        with st.expander("📋 View Uncategorized Campaigns"):
-            st.dataframe(
-                uncategorized[['date', 'spend', 'revenue', 'impressions', 'clicks']],
-                use_container_width=True
-        )
-    
-    else:
-        st.success("✅ **Data Integrity:** All campaigns are properly categorized.")
-
-    st.markdown("---")
-
-def show_north_star(df):
-    """North Star Ribbon -  Top KPIs"""
-
-    # Filter only valid stages
-    valid_df = df[df['funnel_stage'] != 'UNCATEGORIZED']
-
-    # Calculate metrics
-    total_revenue = valid_df['revenue'].sum()
-    total_spend = valid_df['spend'].sum()
-    total_orders = valid_df['orders'].sum()
-    mer = total_revenue / total_spend if total_spend > 0 else 0
-    contribution = total_revenue - total_spend
-    cpa = total_spend / total_orders if total_orders > 0 else 0
-    ltv_cac = 3.2  # Simplified for demo
-
-    # Platform Trust Index
-    pixel_revenue = total_revenue * 1.2  # Pixel over-reports by ~20%
-    trust_index = (total_revenue / pixel_revenue) * 100
-
-    st.markdown("#### 📊 **NORTH STAR RIBBON**")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("MER (7-Day Rolling)", f"{mer:.2f}x",
-            delta=f"+{mer - TARGETS['MER']:.2f}" if mer > TARGETS['MER'] else f"{mer - TARGETS['MER']:.2f}",
-            help="Revenue ÷ Spend. Target: 3.0x")
-    
-    with col2:
-        st.metric("Contribution Margin ($)", f"${contribution:,.0f}",
-            delta="+12%",
-            help="Total Revenue - Total Ad Spend")
-    
-    with col3:
-        st.metric("Projected LTV:CAC", f"{ltv_cac:.1f}",
-            delta="+0.4",
-            help="60-Day LTV ÷ CPA. Target > 3.0")
-    
-    # Second row
-    col4, col5, col6 = st.columns(3)
-
-    with col4:
-        st.metric("Real Revenue", f"${total_revenue:,.0f}",
-            help="Backend confirmed orders (Source of Truth)")
-
-    with col5:
-        st.metric("Platform Trust Index", f"{trust_index:.0f}%",
-            delta="-20%",
-            help="Backend Sales vs Pixel Sales. 100% = perfect match")
-
-    with col6:
-        st.metric("Total CPA", f"${cpa:.2f}",
-            help="Total Spend ÷ Total Orders")
-
-    st.markdown("---")
-
-def show_main_terminal(df):
-    """Main Terminal - Funnel Breakdown Table"""
-
-    st.markdown("#### 🎯 **MAIN TERMINAL — FUNNEL BREAKDOWN**")
-
-    # Filter valid stages only
-    valid_df = df[df['funnel_stage'] != 'UNCATEGORIZED']
-
-    # Aggregate by funnel stage
-    funnel_summary = valid_df.groupby('funnel_stage').agg({
-        'spend': 'sum',
-        'impressions': 'sum',
-        'clicks': 'sum',
-        'orders': 'sum',
-        'revenue': 'sum',
-        'contribution': 'sum'
-    }).reset_index()
-
-    # Calculate derived metrics
-    funnel_summary['ctr'] = (funnel_summary['clicks'] / funnel_summary['impressions'] * 100).round(2)
-    funnel_summary['cpm'] = (funnel_summary['spend'] / funnel_summary['impressions'] * 1000).round(2)
-    funnel_summary['cpc'] = (funnel_summary['spend'] / funnel_summary['clicks']).round(2)
-    funnel_summary['cpa'] = (funnel_summary['spend'] / funnel_summary['orders']).round(2)
-    funnel_summary['roas'] = (funnel_summary['revenue'] / funnel_summary['spend']).round(2)
-    funnel_summary['aov'] = (funnel_summary['revenue'] / funnel_summary['orders']).round(2)
-    funnel_summary['conv_rate'] = (funnel_summary['orders'] / funnel_summary['clicks'] * 100).round(2)
-
-    # Define display order
-    stage_order = ['TOF', 'MOF', 'BOF', 'RET']
-    stage_icons = {
-        'TOF': '🔵 TOF - Top of Funnel',
-        'MOF': '🟣 MOF - Mid of Funnel',
-        'BOF': '🟠 BOF - Bottom of Funnel',
-        'RET': '🟢 RET - Retention'
-    }
-
-    funnel_summary['funnel_stage'] = funnel_summary['funnel_stage'].map(stage_icons)
-    funnel_summary = funnel_summary.set_index('funnel_stage').reindex(
-        [stage_icons[s] for s in stage_order]
+    # Top campaign by CTR
+    camp_sum = df.groupby('campaign_name').agg(
+        spend=('spend','sum'),
+        impressions=('impressions','sum'),
+        clicks=('clicks','sum'),
     ).reset_index()
+    camp_sum['ctr'] = camp_sum['clicks'] / camp_sum['impressions'].clip(lower=1) * 100
+    top_camp        = camp_sum.loc[camp_sum['ctr'].idxmax(), 'campaign_name'] \
+                      if not camp_sum.empty else 'N/A'
+    top_camp_ctr    = camp_sum['ctr'].max() if not camp_sum.empty else 0
 
-    # Format display columns
-    display_df = funnel_summary[
-        ['funnel_stage', 'spend', 'contribution', 'impressions',
-        'cpm', 'ctr', 'cpc', 'cpa', 'roas', 'aov', 'conv_rate']
-    ].copy()
-
-    display_df.columns = [
-        'Funnel Stage',
-        'Spend ($)', 'Contribution ($)', 'Impressions',
-        'CPM ($)', 'CTR (%)', 'CPC ($)', 'CPA ($)',
-        'ROAS', 'AOV ($)', 'Conv Rate (%)'
+    # ── Render 6 metric cards ────────────────────────────────────
+    cols = st.columns(6)
+    metrics = [
+        ("Total Spend",   fmt_idr(total_spend),           "Ad budget used",       NEON_BLUE),
+        ("Impressions",   fmt_num(total_impressions),      "Total ad views",       NEON_PURPLE),
+        ("Clicks",        fmt_num(total_clicks),           "Total link clicks",    NEON_GREEN),
+        ("Avg CTR",       f"{avg_ctr:.2f}%",              "Click-through rate",   NEON_YELLOW
+         if avg_ctr >= 1.5 else NEON_RED),
+        ("Avg CPM",       fmt_idr(avg_cpm),               "Cost per 1K views",    TEXT_SECONDARY),
+        ("Avg CPC",       fmt_idr(avg_cpc),               "Cost per click",       TEXT_SECONDARY),
     ]
 
-    # Format numbers
-    display_df['Spend ($)'] = display_df['Spend ($)'].apply(lambda x: f"${x:,.0f}")
-    display_df['Contribution ($)'] = display_df['Contribution ($)'].apply(lambda x: f"${x:,.0f}")
-    display_df['Impressions'] = display_df['Impressions'].apply(lambda x: f"{x:,}")
-    display_df['CPM ($)'] = display_df['CPM ($)'].apply(lambda x: f"${x:,.2f}")
-    display_df['CPC ($)'] = display_df['CPC ($)'].apply(lambda x: f"${x:,.2f}")
-    display_df['CPA ($)'] = display_df['CPA ($)'].apply(lambda x: f"${x:,.2f}")
-    display_df['AOV ($)'] = display_df['AOV ($)'].apply(lambda x: f"${x:,.2f}")
-    display_df['Conv Rate (%)'] = display_df['Conv Rate (%)'].apply(lambda x: f"{x:.2f}%")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    for i, (label, value, note, color) in enumerate(metrics):
+        with cols[i]:
+            _html(
+                f'<div style="background:{CARD_BG};border:1px solid {CARD_BORDER};border-top:3px solid {color};border-radius:8px;padding:14px 16px;">'
+                f'<div style="font-size:10px;color:{TEXT_SECONDARY};text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">{label}</div>'
+                f'<div style="font-size:20px;font-weight:700;color:{color};line-height:1.2;">{value}</div>'
+                f'<div style="font-size:10px;color:#3A4055;margin-top:4px;">{note}</div>'
+                f'</div>'
+            )
 
-    st.markdown("---")
+    # ── Top Campaign Banner ───────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    stage     = get_funnel_stage(top_camp)
+    stg_color = FUNNEL_COLORS.get(stage, NEON_BLUE)
 
-    # ========================================
-    # SPEND vs ROAS COMPARISON CHART
-    # ========================================
-
-    st.markdown("#### 📈 **SPEND vs ROAS — BY FUNNEL STAGE**")
-
-    # Re-aggregate for chart (without icon labels)
-    chart_df = valid_df.groupby('funnel_stage').agg({
-        'spend': 'sum',
-        'revenue': 'sum'
-    }).reset_index()
-
-    chart_df['roas'] = (chart_df['revenue'] / chart_df['spend']).round(2)
-
-    # Map names
-    chart_df['funnel_stage'] = chart_df['funnel_stage'].map({
-        'TOF': 'TOF',
-        'MOF': 'MOF',
-        'BOF': 'BOF',
-        'RET': 'RET'
-    })
-
-    stage_colors = ['#00D9FF', '#B026FF', '#FFB800', '#00FF88']
-
-    fig = go.Figure()
-
-    # Bar: Spend
-    fig.add_trace(go.Bar(
-        x=chart_df['funnel_stage'],
-        y=chart_df['spend'],
-        name='Spend ($)',
-        marker_color=stage_colors,
-        marker_line_color='#0E1117',
-        marker_line_width=2
-    ))
-
-    # Line: ROAS
-    fig.add_trace(go.Scatter(
-        x=chart_df['funnel_stage'],
-        y=chart_df['roas'],
-        name='ROAS',
-        mode='lines+markers',
-        line=dict(color='#FFFFFF', width=3),
-        marker=dict(size=12, color='#FFFFFF',
-                    line=dict(color='#00D9FF', width=2))
-    ))
-
-    fig.update_layout(
-        paper_bgcolor='#0E1117',
-        plot_bgcolor='#1E1E1E',
-        font=dict(color='#FAFAFA', family='monospace'),
-        title_text="Spend Distribution & ROAS by Funnel Stage",
-        title_font_color='#00D9FF',
-        xaxis_title="Funnel Stage",
-        yaxis_title="Spend ($)",
-        yaxis2=dict(
-            title='ROAS',
-            overlaying='y',
-            side='right',
-            showgrid=False,
-            titlefont=dict(color='#FFFFFF')
-        ),
-        legend=dict(
-            orientation='h',
-            yanchor='bottom',
-            y=-0.3,
-            xanchor='center',
-            x=0.5
-        ),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor='#2D2D2D'),
-        height=400
+    _html(
+        f'<div style="background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.2);border-left:4px solid {stg_color};border-radius:8px;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;">'
+        f'<div>'
+        f'<div style="font-size:10px;color:{TEXT_SECONDARY};text-transform:uppercase;letter-spacing:1px;">Top Performing Campaign</div>'
+        f'<div style="font-size:15px;font-weight:600;color:{TEXT_PRIMARY};margin-top:4px;">{top_camp}</div>'
+        f'</div>'
+        f'<div style="text-align:right;">'
+        f'<div style="font-size:24px;font-weight:700;color:{stg_color};">{top_camp_ctr:.2f}%</div>'
+        f'<div style="font-size:10px;color:{TEXT_SECONDARY};">CTR</div>'
+        f'</div>'
+        f'</div>'
     )
 
-    st.plotly_chart(fig, use_container_width=True)
 
-def show_welth_engine(df):
-    """Cohort LTV Analysis - The Triangel of Truth"""
+# ══════════════════════════════════════════════════════════════════
+# SECTION 2: CAMPAIGN TERMINAL (Funnel Breakdown)
+# ══════════════════════════════════════════════════════════════════
 
-    st.markdown("---")
-    st.markdown("#### 💎 **WEALTH ENGINE — COHORT LTV ANALYSIS**")
+def render_campaign_terminal(df: pd.DataFrame):
+    """Campaign Terminal — Funnel breakdown per campaign."""
+    section_header("Campaign Terminal — Funnel Breakdown")
 
-    # Load cohort data
-    loader = DataLoader()
-    cohort_df = loader.load_cohort_data()
-
-    if cohort_df.empty:
-        st.warning("⚠️ Cohort data not available")
+    if df.empty:
+        st.info("Tidak ada data tersedia.")
         return
-    
-    # Toogle view
-    view_mode = st.radio(
-        "**View Mode:**",
-        ["💰 LTV Progression", "📊 Retention Metrics"],
-        horizontal=True
+
+    # ── Aggregate per campaign ────────────────────────────────────
+    camp = df.groupby(['funnel_stage','campaign_name','portfolio']).agg(
+        spend=('spend','sum'), impressions=('impressions','sum'), clicks=('clicks','sum'),
+    ).reset_index()
+    camp['ctr'] = camp['clicks'] / camp['impressions'].clip(lower=1) * 100
+    camp['cpm'] = camp['spend']  / camp['impressions'].clip(lower=1) * 1000
+    camp['cpc'] = camp['spend']  / camp['clicks'].clip(lower=1)
+
+    stage_order = ['UNCATEGORIZED','TOF','MOF','BOF','RET']
+    stage_icons = {'UNCATEGORIZED':'&#128308;','TOF':'&#128309;','MOF':'&#128995;','BOF':'&#128992;','RET':'&#128994;'}
+
+    TH = 'padding:10px 12px;text-align:left;font-size:10px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;white-space:nowrap;'
+
+    stage_totals = df.groupby('funnel_stage').agg(
+        spend=('spend','sum'), impressions=('impressions','sum'), clicks=('clicks','sum'),
+    ).reset_index()
+    stage_totals['ctr'] = stage_totals['clicks'] / stage_totals['impressions'].clip(lower=1) * 100
+    stage_totals['cpm'] = stage_totals['spend']  / stage_totals['impressions'].clip(lower=1) * 1000
+    stage_totals['cpc'] = stage_totals['spend']  / stage_totals['clicks'].clip(lower=1)
+
+    # Build all rows as a single string — no multiline f-strings
+    rows = ''
+    for stage in stage_order:
+        stage_camps = camp[camp['funnel_stage'] == stage]
+        if stage_camps.empty:
+            continue
+        color = FUNNEL_COLORS.get(stage, '#888')
+        icon  = stage_icons.get(stage, '&#9898;')
+        label = FUNNEL_LABELS.get(stage, stage)
+        r     = int(color[1:3],16)
+        g     = int(color[3:5],16)
+        b     = int(color[5:7],16)
+
+        # Stage header row
+        st_row = stage_totals[stage_totals['funnel_stage'] == stage]
+        if not st_row.empty:
+            s = st_row.iloc[0]
+            rows += (
+                f'<tr style="background:rgba({r},{g},{b},0.08);border-bottom:1px solid {color}33;">'
+                f'<td style="padding:10px 12px;font-size:14px;">{icon}</td>'
+                f'<td colspan="2" style="padding:10px 12px;font-size:12px;font-weight:700;color:{color};text-transform:uppercase;letter-spacing:1px;">{label}</td>'
+                f'<td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:700;color:{color};">{fmt_idr(s["spend"])}</td>'
+                f'<td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:700;color:{color};">{fmt_num(s["impressions"])}</td>'
+                f'<td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:700;color:{color};">{fmt_idr(s["cpm"])}</td>'
+                f'<td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:700;color:{color};">{fmt_num(s["clicks"])}</td>'
+                f'<td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:700;color:{color};">{s["ctr"]:.2f}%</td>'
+                f'<td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:700;color:{color};">{fmt_idr(s["cpc"])}</td>'
+                f'</tr>'
+            )
+
+        # Campaign rows
+        for _, row in stage_camps.iterrows():
+            cc = NEON_GREEN if row['ctr'] >= 2.0 else (NEON_YELLOW if row['ctr'] >= 1.0 else NEON_RED)
+            rows += (
+                f'<tr style="border-bottom:1px solid #1a2035;">'
+                f'<td style="padding:8px 12px;"></td>'
+                f'<td style="padding:8px 12px;font-size:13px;color:#f1f5f9;font-weight:500;">{row["campaign_name"]}</td>'
+                f'<td style="padding:8px 12px;font-size:11px;color:#6b7280;">{row["portfolio"]}</td>'
+                f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#f1f5f9;">{fmt_idr(row["spend"])}</td>'
+                f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#f1f5f9;">{fmt_num(row["impressions"])}</td>'
+                f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#8892A0;">{fmt_idr(row["cpm"])}</td>'
+                f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#f1f5f9;">{fmt_num(row["clicks"])}</td>'
+                f'<td style="padding:8px 12px;text-align:right;"><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:700;color:{cc};background:rgba(255,255,255,0.05);">{row["ctr"]:.2f}%</span></td>'
+                f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#8892A0;">{fmt_idr(row["cpc"])}</td>'
+                f'</tr>'
+            )
+
+    # Grand total
+    gs = df["spend"].sum(); gi = df["impressions"].sum(); gc = df["clicks"].sum()
+    gctr = gc/max(gi,1)*100; gcpm = gs/max(gi,1)*1000; gcpc = gs/max(gc,1)
+    rows += (
+        f'<tr style="background:#111827;border-top:2px solid #2D3348;">'
+        f'<td style="padding:12px;"></td>'
+        f'<td colspan="2" style="padding:12px;font-size:12px;font-weight:700;color:{TEXT_SECONDARY};text-transform:uppercase;letter-spacing:1px;">Grand Total</td>'
+        f'<td style="padding:12px;text-align:right;font-size:14px;font-weight:700;color:{TEXT_PRIMARY};">{fmt_idr(gs)}</td>'
+        f'<td style="padding:12px;text-align:right;font-size:14px;font-weight:700;color:{TEXT_PRIMARY};">{fmt_num(gi)}</td>'
+        f'<td style="padding:12px;text-align:right;font-size:14px;font-weight:700;color:{TEXT_PRIMARY};">{fmt_idr(gcpm)}</td>'
+        f'<td style="padding:12px;text-align:right;font-size:14px;font-weight:700;color:{TEXT_PRIMARY};">{fmt_num(gc)}</td>'
+        f'<td style="padding:12px;text-align:right;font-size:14px;font-weight:700;color:{TEXT_PRIMARY};">{gctr:.2f}%</td>'
+        f'<td style="padding:12px;text-align:right;font-size:14px;font-weight:700;color:{TEXT_PRIMARY};">{fmt_idr(gcpc)}</td>'
+        f'</tr>'
     )
 
-    if view_mode == "💰 LTV Progression":
-        show_ltv_heatmap(cohort_df)
-    else:
-        show_retention_metrics(cohort_df)
-
-def show_ltv_heatmap(cohort_df):
-    """Ther Triangel of Truth - LTV Heatmap"""
-
-    # Pivot for heatmap
-    pivot_df = cohort_df.pivot_table(
-        index='cohort',
-        columns='day',
-        values='ltv',
-        aggfunc='mean'
+    header = (
+        f'<tr style="background:#111827;border-bottom:2px solid #1f2937;">'
+        f'<th style="{TH}width:20px;"></th>'
+        f'<th style="{TH}min-width:220px;">Campaign</th>'
+        f'<th style="{TH}">Portfolio</th>'
+        f'<th style="{TH}text-align:right;">Spend</th>'
+        f'<th style="{TH}text-align:right;">Impressions</th>'
+        f'<th style="{TH}text-align:right;">CPM</th>'
+        f'<th style="{TH}text-align:right;">Clicks</th>'
+        f'<th style="{TH}text-align:right;">CTR</th>'
+        f'<th style="{TH}text-align:right;">CPC</th>'
+        f'</tr>'
     )
 
-    fig = go.Figure(data=go.Heatmap(
-        z=pivot_df.values,
-        x=['Day 0', 'Day 30', 'Day 60', 'Day 90'],
-        y=pivot_df.index,
-        colorscale=[
-            [0.5, "#FF0055"],
-            [0.5, "#FFB800"],
-            [1.0, "#00FF88"]
-        ],
-        text=pivot_df.values.round(2),
-        texttemplate='$%{text}',
-        textfont={"size":11, "color": "#0E1117"},
-        colorbar=dict(
-            title="LTV ($)",
-            titleside="right",
-            tickmode="linear",
-            tick0=0,
-            dtick=50,
-            titlefont=dict(color='#FAFAFA'),
-            tickfont=dict(color='#FAFAFA')
-        ),
-        hovertemplate='<b>%{y}</b><br>%{x}<br>LTV: $%{z:.2f}<extra></extra>'
-    ))
+    # Strip semua newline dari rows sebelum render
+    import re
+    rows_clean  = re.sub(r'\s+', ' ', rows).strip()
+    header_clean = re.sub(r'\s+', ' ', header).strip()
 
-    fig.update_layout(
-        title="Cohort LTV Progression (The Triangel of Truth)",
-        title_font_color='#00D9FF',
-        xaxis_title="Days Since Acquisition",
-        yaxis_title="Acquisition Cohort",
-        paper_bgcolor='#0E1117',
-        plot_bgcolor='#1E1E1E',
-        font=dict(color='#FAFAFA', family='monospace'),
-        height=500,
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=False, autorange='reversed')
+    st.markdown(
+        f'<div style="border-radius:10px;border:1px solid #1f2937;background:#0d1117;overflow:hidden;">'
+        f'<div style="overflow-x:auto;">'
+        f'<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+        f'<thead>{header_clean}</thead>'
+        f'<tbody>{rows_clean}</tbody>'
+        f'</table></div></div>',
+        unsafe_allow_html=True
     )
 
-    st.plotly_chart(fig, use_container_width=True)
 
-    # Insight
-    st.markdown("**💡 Heatmap Insights:**")
+# ══════════════════════════════════════════════════════════════════
+# SECTION 3: CONTEXT GRAPH
+# ══════════════════════════════════════════════════════════════════
 
-    col1, col2 = st.columns(2)
+def render_context_graph(df: pd.DataFrame):
+    """
+    Context Graph — Daily Spend (bar) + CTR (line) dual-axis chart.
+    Per campaign dengan toggle.
+    """
+    section_header("Context Graph — Daily Spend & CTR Trend")
 
-    with col1:
-        # Best performing cohort
-        day_60_ltv = cohort_df[cohort_df['day'] == 60].groupby('cohort')['ltv'].mean()
-        best_cohort = day_60_ltv.idxmax()
-        best_ltv = day_60_ltv.max()
+    if df.empty:
+        st.info("Tidak ada data tersedia.")
+        return
 
-        st.success(f"🏆 **Best Cohort:** {best_cohort} (Day 60 LTV: ${best_ltv:.2f})")
-    with col2:
-        # Average LTV
-        avg_growth = cohort_df.groupby('day')['ltv'].mean()
-        growth_rate = ((avg_growth[90] - avg_growth[0]) / avg_growth[0]) * 100
-
-        st.info(f"📈 **Avg LTV Growth:** {growth_rate:.2f}% from Day 0 to Day 90")
-
-def show_retention_metrics(cohort_df):
-    """Retention Economics Metrics"""
-
-    # Calculate metrics
-    latest_cohort = cohort_df[cohort_df['cohort'] == cohort_df['cohort'].max()]
-
-    day_60_ltv = latest_cohort[latest_cohort['day'] == 60]['ltv'].values[0]
-    avg_cpa = 35 # Simplified
-
-    cash_multiplier = day_60_ltv/ avg_cpa
-    payback_period = 30
-    second_order_rate = latest_cohort[latest_cohort['day'] == 30]['second_order_rate'].values[0] * 100
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(
-            "💰 Cash Multiplier (Day 60)",
-            f"{cash_multiplier:.2f}x",
-            help="LTV (Day 60) ÷ CPA. Shows scale potential."
+    # ── Controls ──────────────────────────────────────────────────
+    col_c1, col_c2 = st.columns([2, 2])
+    with col_c1:
+        view_by = st.selectbox(
+            "View by",
+            ["All Campaigns", "By Funnel Stage", "By Campaign"],
+            key="rev_context_view"
         )
-    
-    with col2:
-        st.metric(
-            "⏱️ Payback Period",
-            f"{payback_period} days",
-            help="Days to break even on ad spend"
+    with col_c2:
+        metric_line = st.selectbox(
+            "Line metric",
+            ["CTR (%)", "CPC (Rp)", "CPM (Rp)"],
+            key="rev_context_metric"
         )
-    
-    with col3:
-        st.metric(
-            "🔄 Second Order Rate",
-            f"{second_order_rate:.1f}%",
-            help="% of customers who buy again within 30 days"
-        )
-    
-    st.markdown("---")
 
-    # Retention curve
-    retention_data = cohort_df.groupby('day')['retention_rate'].mean().reset_index()
+    # ── Aggregate ─────────────────────────────────────────────────
+    if view_by == "All Campaigns":
+        daily = df.groupby('date').agg(
+            spend=('spend','sum'),
+            impressions=('impressions','sum'),
+            clicks=('clicks','sum'),
+        ).reset_index()
+        daily['ctr'] = daily['clicks'] / daily['impressions'].clip(lower=1) * 100
+        daily['cpc'] = daily['spend']  / daily['clicks'].clip(lower=1)
+        daily['cpm'] = daily['spend']  / daily['impressions'].clip(lower=1) * 1000
+        groups = [('All Campaigns', daily, NEON_BLUE)]
 
+    elif view_by == "By Funnel Stage":
+        groups = []
+        for stage in ['TOF','MOF','BOF','RET']:
+            sub = df[df['funnel_stage'] == stage]
+            if sub.empty: continue
+            daily = sub.groupby('date').agg(
+                spend=('spend','sum'),
+                impressions=('impressions','sum'),
+                clicks=('clicks','sum'),
+            ).reset_index()
+            daily['ctr'] = daily['clicks'] / daily['impressions'].clip(lower=1) * 100
+            daily['cpc'] = daily['spend']  / daily['clicks'].clip(lower=1)
+            daily['cpm'] = daily['spend']  / daily['impressions'].clip(lower=1) * 1000
+            groups.append((FUNNEL_LABELS[stage], daily, FUNNEL_COLORS[stage]))
+
+    else:  # By Campaign
+        groups = []
+        colors_list = [NEON_BLUE, NEON_PURPLE, NEON_ORANGE, NEON_GREEN, NEON_YELLOW]
+        for i, camp in enumerate(df['campaign_name'].unique()):
+            sub = df[df['campaign_name'] == camp]
+            daily = sub.groupby('date').agg(
+                spend=('spend','sum'),
+                impressions=('impressions','sum'),
+                clicks=('clicks','sum'),
+            ).reset_index()
+            daily['ctr'] = daily['clicks'] / daily['impressions'].clip(lower=1) * 100
+            daily['cpc'] = daily['spend']  / daily['clicks'].clip(lower=1)
+            daily['cpm'] = daily['spend']  / daily['impressions'].clip(lower=1) * 1000
+            groups.append((camp, daily, colors_list[i % len(colors_list)]))
+
+    # ── Build chart ───────────────────────────────────────────────
     fig = go.Figure()
 
-    fig.add_trace(go.Scatter(
-        x=['Day 0', 'Day 30', 'Day 60', 'Day 90'],
-        y=retention_data['retention_rate'] * 100,
-        mode='lines+markers',
-        line=dict(color='#00FF88', width=3),
-        marker=dict(size=12, color='#00FF88',
-                    line=dict(color='#00D9FF', width=2)),
-        fill='tozeroy',
-        fillcolor='rgba(0, 255, 136, 0.2)',
-        name='Retention Rate (%)'
-    ))
+    line_col_map = {
+        "CTR (%)": ('ctr', '%', 1),
+        "CPC (Rp)": ('cpc', 'Rp', 0),
+        "CPM (Rp)": ('cpm', 'Rp', 0),
+    }
+    line_col, line_suffix, line_dec = line_col_map[metric_line]
+
+    for label, daily, color in groups:
+        if daily.empty: continue
+
+        # Bar: spend
+        fig.add_trace(go.Bar(
+            name        = f"{label} — Spend",
+            x           = daily['date'],
+            y           = daily['spend'],
+            marker_color= color,
+            opacity     = 0.7,
+            yaxis       = 'y',
+            hovertemplate = (
+                f"<b>{label}</b><br>"
+                "Date: %{x}<br>"
+                "Spend: Rp %{y:,.0f}<extra></extra>"
+            ),
+        ))
+
+        # Line: selected metric
+        fig.add_trace(go.Scatter(
+            name      = f"{label} — {metric_line}",
+            x         = daily['date'],
+            y         = daily[line_col],
+            mode      = 'lines+markers',
+            line      = dict(color=color, width=2, dash='dot'),
+            marker    = dict(size=6),
+            yaxis     = 'y2',
+            hovertemplate = (
+                f"<b>{label}</b><br>"
+                f"Date: %{{x}}<br>"
+                f"{metric_line}: %{{y:.{line_dec}f}}{line_suffix}<extra></extra>"
+            ),
+        ))
 
     fig.update_layout(
-        title="Customer Retention Curve",
-        title_font_color='#00D9FF',
-        xaxis_title="Days Since Acquisition",
-        yaxis_title="Retention Rate (%)",
-        paper_bgcolor='#0E1117',
-        plot_bgcolor='#1E1E1E',
-        font=dict(color='#FAFAFA', family='monospace'),
-        height=350,
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor='#2D2D2D', range=[0, 100]),
-        showlegend=False
+        plot_bgcolor  = "rgba(0,0,0,0)",
+        paper_bgcolor = "rgba(0,0,0,0)",
+        font          = dict(color=TEXT_SECONDARY, size=12),
+        height        = 380,
+        margin        = dict(l=10, r=10, t=20, b=10),
+        legend        = dict(
+            orientation = "h",
+            yanchor     = "bottom",
+            y           = 1.02,
+            xanchor     = "right",
+            x           = 1,
+            font        = dict(size=11),
+        ),
+        barmode       = 'stack',
+        xaxis         = dict(
+            gridcolor   = '#1E2335',
+            showgrid    = True,
+            tickformat  = "%d %b",
+        ),
+        yaxis         = dict(
+            title       = "Spend (Rp)",
+            gridcolor   = '#1E2335',
+            showgrid    = True,
+            tickprefix  = "Rp ",
+            tickformat  = ",.0f",
+        ),
+        yaxis2        = dict(
+            title       = metric_line,
+            overlaying  = "y",
+            side        = "right",
+            showgrid    = False,
+            ticksuffix  = line_suffix if line_suffix == '%' else '',
+            tickprefix  = 'Rp ' if 'Rp' in metric_line else '',
+        ),
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-def show_context_graph(df):
-    """MER Timeline - Context Graph"""
 
-    st.markdown("---")
-    st.markdown("#### 📈 **CONTEXT GRAPH — MER TIMELINE**")
+# ══════════════════════════════════════════════════════════════════
+# AI INSIGHTS — Revenue Engineering
+# ══════════════════════════════════════════════════════════════════
 
-    st.caption("Understanding 'Why' numbers moved")
+def generate_revenue_insights(df: pd.DataFrame) -> dict:
+    """Generate AI insights untuk semua section Revenue Engineering."""
+    if df.empty:
+        return {}
 
-    # Filter valid data
-    valid_df = df[df['funnel_stage'] != 'UNCATEGORIZED']
-
-    # Daily aggregation
-    daily_df = valid_df.groupby('date').agg({
-        'spend': 'sum',
-        'revenue': 'sum'
-    }).reset_index()
-
-    daily_df['mer'] = daily_df.apply(lambda row: row['revenue'] / row['spend'] if row['spend'] > 0 else 0, axis=1)
-
-    # Create dual axis chart
-    fig = go.Figure()
-
-    # Bar: Spend
-    fig.add_trace(go.Bar(
-        x=daily_df['date'],
-        y=daily_df['spend'],
-        name='Ad Spend ($)',
-        marker_color='#00D9FF',
-        marker_line_color='#0E1117',
-        marker_line_width=1,
-        yaxis='y',
-        opacity=0.7
-    ))
-
-    # Line: MER
-    fig.add_trace(go.Scatter(
-        x=daily_df['date'],
-        y=daily_df['mer'],
-        name='MER',
-        mode='lines+markers',
-        line=dict(color='#00FF88', width=3),
-        marker=dict(size=6, color='#00FF88'),
-        yaxis='y2'
-    ))
-
-    # Add event annotations (placeholder)
-    # Add event annotations (simulated) - SAFE VERSION
-    events = []
-    
-    # Only add events if we have enough data
-    if len(daily_df) > 15:
-        events.append({'date': daily_df['date'].iloc[15], 'icon': '📧', 'text': 'Email Blast'})
-    
-    if len(daily_df) > 45:
-        events.append({'date': daily_df['date'].iloc[45], 'icon': '🏷️', 'text': 'Sale Launch'})
-    
-    if len(daily_df) > 75:
-        events.append({'date': daily_df['date'].iloc[75], 'icon': '⚠️', 'text': 'Tech Issue'})
-
-    for event in events:
-        fig.add_annotation(
-            x=event['date'],
-            y=daily_df[daily_df['date'] == event['date']]['mer'].values[0],
-            text=f"{event['icon']}<br>{event['text']}",
-            showarrow=True,
-            arrowhead=2,
-            arrowcolor="#FFB800",
-            arrowsize=1,
-            arrowwidth=2,
-            ax=0,
-            ay=-60,
-            font=dict(size=10, color="#FFFFFF"),
-            bgcolor='rgba(30, 30, 30, 0.8)',
-            bordercolor='#FFB800',
-            borderwidth=2
-        )
-    
-    fig.update_layout(
-        title="Daily Ad Spend vs MER (with Event Overlays)",
-        title_font_color='#00D9FF',
-        xaxis_title="Date",
-        yaxis=dict(
-            title="Ad Spend ($)",
-            titlefont=dict(color='#00D9FF'),
-            tickfont=dict(color='#00D9FF'),
-            showgrid=True,
-            gridcolor='#2D2D2D' 
-        ),
-        yaxis2=dict(
-            title="MER (Marketing Efficiency Ratio)",
-            titlefont=dict(color='#00FF88'),
-            tickfont=dict(color='#00FF88'),
-            overlaying='y',
-            side='right',
-            showgrid=False
-        ),
-        paper_bgcolor='#0E1117',
-        plot_bgcolor='#1E1E1E',
-        font=dict(color='#FAFAFA', family='monospace'),
-        hovermode='x unified',
-        height=450,
-        legend=dict(
-            orientation='h',
-            yanchor='bottom',
-            y=-0.3,
-            xanchor='center',
-            x=0.5
-        )
+    cache_key = (
+        f"revenue_insights_"
+        f"{len(df)}_"
+        f"{str(df['date'].min())[:10]}_"
+        f"{str(df['date'].max())[:10]}_"
+        f"{sorted(df['portfolio'].unique().tolist())}"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
-    st.info("""
-    **📊 How to read this chart:**
-    - **Blue bars** = Daily ad spend  
-    - **Green line** = Marketing Efficiency Ratio (Revenue ÷ Spend)  
-    - **Yellow icons** = External events that influenced performance
-    """)
+    if st.session_state.get('rev_insight_cache_key') == cache_key:
+        return st.session_state.get('revenue_insights', {})
 
-def show_ai_insights(df):
-    """AI Bain Logic - Automated Insights"""
-    st.markdown("---")
-    st.markdown("#### 🤖 **AI BRAIN LOGIC — AUTOMATED INSIGHTS**")
+    try:
+        from services.ai_service import RevenueInsightGenerator
+        with st.spinner('Generating AI insights...'):
+            generator = RevenueInsightGenerator(df)
+            insights  = generator.generate_all()
+        st.session_state['revenue_insights']     = insights
+        st.session_state['rev_insight_cache_key'] = cache_key
+        return insights
+    except Exception as e:
+        st.warning(f"AI insights unavailable: {e}")
+        return {}
 
-    # Calculate key metrics
-    valid_df = df[df['funnel_stage'] != 'UNCATEGORIZED']
 
-    total_spend = valid_df['spend'].sum()
-    total_revenue = valid_df['revenue'].sum()
-    mer = total_revenue / total_spend if total_spend > 0 else 0
+# ══════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
 
-    # Last 7 days vs previous 7 days
-    last_7 = valid_df[valid_df['date'] >= valid_df['date'].max() - pd.Timedelta(days=7)]
-    prev_7 = valid_df[
-        (valid_df['date'] >= valid_df['date'].max() - pd.Timedelta(days=14)) &
-        (valid_df['date'] < valid_df['date'].max() - pd.Timedelta(days=7))
-    ]
+def show_revenue_engineering():
+    """Main entry point untuk Revenue Engineering module."""
 
-    last_7_mer = last_7['revenue'].sum() / last_7['spend'].sum() if last_7['spend'].sum() > 0 else 0
-    prev_7_mer = prev_7['revenue'].sum() / prev_7['spend'].sum() if prev_7['spend'].sum() > 0 else 0
+    # ── Header ────────────────────────────────────────────────────
+    _html(
+        '<div style="background:linear-gradient(135deg,#1B1F2B 0%,#13161F 100%);border:1px solid #2D3348;border-radius:12px;padding:20px 28px;margin-bottom:28px;position:relative;overflow:hidden;">'
+        '<div style="position:absolute;top:0;right:0;width:220px;height:100%;background:radial-gradient(ellipse at 80% 50%,rgba(0,212,255,0.07) 0%,transparent 70%);pointer-events:none;"></div>'
+        '<div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;">'
+        '<div style="width:4px;height:52px;border-radius:4px;background:linear-gradient(180deg,#00D4FF 0%,transparent 100%);box-shadow:0 0 14px rgba(0,212,255,0.6);flex-shrink:0;"></div>'
+        '<div>'
+        '<div style="font-size:10px;font-weight:700;letter-spacing:2.5px;color:#00D4FF;text-transform:uppercase;font-family:monospace;margin-bottom:5px;opacity:0.9;">MODULE 01 &nbsp;·&nbsp; FINANCIAL TERMINAL</div>'
+        '<div style="font-size:26px;font-weight:800;color:#FFFFFF;line-height:1.2;letter-spacing:-0.3px;">💹 Revenue Engineering</div>'
+        '<div style="font-size:13px;color:#8892A0;margin-top:5px;line-height:1.5;">Ad Performance &amp; Spend Efficiency across all Portfolios</div>'
+        '</div>'
+        '</div>'
+        '<div style="height:1px;background:linear-gradient(to right,rgba(0,212,255,0.35),transparent);"></div>'
+        '</div>'
+    )
 
-    mer_change = ((last_7_mer - prev_7_mer)/prev_7_mer * 100) if prev_7_mer > 0 else 0
+    # ── Filters ───────────────────────────────────────────────────
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
 
-    # Generate insights
-    insights = []
+    with col_f1:
+        date_range = st.selectbox(
+            "Time Range",
+            ["Last 7 Days", "Last 14 Days", "Last 30 Days", "All Time"],
+            index=3,
+            key="rev_date_range"
+        )
 
-    # Insight 1: MER Change
-    if mer < TARGETS['MER']:
-        ctr_avg = valid_df['ctr'].mean()
-        conv_avg = valid_df['conv_rate'].mean()
+    # Load data
+    loader = DataLoader(portfolio='all')
+    df_raw = loader.load_revenue_data()
 
-        if conv_avg < 2.0:
-            insights.append({
-                'type': 'warning',
-                'title': '⚠️ Profit Protector Alert',
-                'message': f"Your MER is below target at {mer:.2f}x. Consider optimizing your bottom funnel strategies to boost conversions."
-            })
-    
-    # insight 2: Scale Signal
-    tof_data = valid_df[valid_df['funnel_stage'] == 'TOF']
-    if not tof_data.empty:
-        tof_cpa = tof_data['spend'].sum() / tof_data['orders'].sum() if tof_data['orders'].sum() > 0 else 0
-        tof_spend = tof_data['spend'].sum()
+    if df_raw.empty:
+        st.warning("""
+        ⚠️ Data ads belum tersedia.
+        Jalankan: `notebooks/update_data.ipynb` untuk fetch dari Meta API.
+        """)
+        return
 
-        if tof_cpa < 30 and tof_spend < 200000:
-            insights.append({
-                'type': 'success',
-                'title': '🚀 Scale Signal Detected',
-                'message': f"Your TOF CPA is strong at ${tof_cpa:.2f}. Consider increasing your top funnel budget to capitalize on this efficiency."
-            })
-    
-    # Insight 3: Cohort Performance
-    ret_data = valid_df[valid_df['funnel_stage'] == 'RET']
-    if not ret_data.empty:
-        ret_roas = ret_data['revenue'].sum() / ret_data['spend'].sum() if ret_data['spend'].sum() > 0 else 0
+    df = prepare_ads_data(df_raw)
 
-        if ret_roas > 5.0:
-            insights.append({
-                'type': 'info',
-                'title': '💎 Whale Watcher Alert',
-                'message': f"Retention campaigns are delivering {ret_roas:.1f}x ROAS (exceptional!). Recent cohorts show high repeat purchase rates. **Recommendation:** Scale retention spend immediately."
-            })
-    
-    # Insight 4: MER Trend
-    if mer_change < -10:
-        insights.append({
-            'type': 'warning',
-            'title': '📉 MER Downtrend Detected',
-            'message': f"'MER declined {abs(mer_change):.1f}% week-over-week. Monitor CTR and conversion rates closely. Consider refreshing creative assets."
-        })
-    elif mer_change > 15:
-        insights.append({
-            'type': 'success',
-            'title': '📈 Positive Momentum',
-            'message': f'MER improved {mer_change:.1f}% week-over-week. Continue current strategy and consider gradual spend increases.'
-        })
+    # Get portfolios
+    portfolios        = ['All Portfolios'] + sorted(df['portfolio'].unique().tolist())
+    with col_f2:
+        selected_port = st.selectbox(
+            "Portfolio",
+            portfolios,
+            key="rev_portfolio"
+        )
+    with col_f3:
+        selected_stage = st.selectbox(
+            "Funnel Stage",
+            ["All Stages", "TOF", "MOF", "BOF", "RET"],
+            key="rev_funnel_stage"
+        )
 
-    # Display insights
-    if insights:
-        for insight in insights:
-            if insight['type'] == 'warning':
-                st.warning(f"**{insight['title']}**\n\n{insight['message']}")
-            elif insight['type'] == 'success':
-                st.success(f"**{insight['title']}**\n\n{insight['message']}")
-            else:
-                st.info(f"**{insight['title']}**\n\n{insight['message']}")
-    else:
-        st.info("✅ **All systems nominal.** No immediate action items detected.")
+    # ── Apply filters ─────────────────────────────────────────────
+    days_map = {
+        "Last 7 Days" : 7,
+        "Last 14 Days": 14,
+        "Last 30 Days": 30,
+        "All Time"    : 9999,
+    }
+    days = days_map.get(date_range, 9999)
+    if days < 9999:
+        cutoff = df['date'].max() - timedelta(days=days)
+        df     = df[df['date'] >= cutoff]
+
+    if selected_port != 'All Portfolios':
+        df = df[df['portfolio'] == selected_port]
+
+    if selected_stage != 'All Stages':
+        df = df[df['funnel_stage'] == selected_stage]
+
+    if df.empty:
+        st.info("Tidak ada data untuk filter yang dipilih.")
+        return
+
+    # ── Generate AI Insights ──────────────────────────────────────
+    insights = generate_revenue_insights(df)
+
+    # ── Section 1: North Star Ribbon ─────────────────────────────
+    divider()
+    render_north_star(df, selected_port)
+    render_inline_insight(insights.get('north_star', {}))
+
+    # ── Section 2: Campaign Terminal ──────────────────────────────
+    divider()
+    render_campaign_terminal(df)
+    render_inline_insight(insights.get('campaign_terminal', {}))
+
+    # ── Section 3: Context Graph ──────────────────────────────────
+    divider()
+    render_context_graph(df)
+    render_inline_insight(insights.get('context_graph', {}))
+
+    divider()

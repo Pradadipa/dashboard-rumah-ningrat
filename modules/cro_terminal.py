@@ -207,10 +207,10 @@ def render_red_alert_funnel(funnel_df):
     # Calculate drop-off rates between stages
     # Becnhmark: what's a healthy pass-thourgh rate per step
     benchmarks = {
-        "Landing Page → Product Page": {"good": 50, "bad": 40},
-        "Product Page → Add to Cart": {"good": 28, "bad": 18},
-        "Add to Cart → Initiate Checkout": {"good": 55, "bad": 40},
-        "Initiate Checkout → Purchase": {"good": 50, "bad": 35},
+        "Landing Page → Product Page": {"good": 50, "warning": 45, "bad": 40},
+        "Product Page → Add to Cart": {"good": 28, "warning": 23, "bad": 18},
+        "Add to Cart → Initiate Checkout": {"good": 55, "warning": 47, "bad": 40},
+        "Initiate Checkout → Purchase": {"good": 50, "warning": 42, "bad": 35},
     }
     transitions = []
     for i in range(len(stages) - 1):
@@ -221,7 +221,7 @@ def render_red_alert_funnel(funnel_df):
         dropped = from_stage["value"] - to_stage["value"]
 
         bm_key = f"{from_stage['name']} → {to_stage['name']}"
-        bm = benchmarks.get(bm_key, {"good": 50, "bad": 35})
+        bm = benchmarks.get(bm_key, {"good": 50, "warning": 35, "bad": 20})
 
         if pass_rate >= bm["good"]:
             health = "good"
