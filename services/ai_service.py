@@ -22,27 +22,20 @@ from openai import OpenAI
 
 load_dotenv()
 
-# Ganti bagian ini di ai_service.py
+MODEL      = 'gpt-4o-mini'
+MAX_TOKENS = 600
 
-import os
-import streamlit as st
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# ── Baca API key — support lokal (.env) dan Streamlit Cloud (secrets) ──
 def _get_openai_key() -> str:
-    # 1. Coba dari Streamlit secrets (Streamlit Cloud)
+    """Baca API key — support Streamlit Cloud secrets & lokal .env."""
+    # 1. Streamlit secrets (Streamlit Cloud)
     try:
-        return st.secrets["OPENAI_API_KEY"]
+        key = st.secrets.get("OPENAI_API_KEY", "")
+        if key:
+            return key
     except Exception:
         pass
-    # 2. Fallback ke environment variable / .env (lokal)
+    # 2. Environment variable / .env (lokal)
     return os.getenv("OPENAI_API_KEY", "")
-
-OPENAI_API_KEY = _get_openai_key()
-MODEL          = 'gpt-4o-mini'
-MAX_TOKENS     = 600
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -173,7 +166,6 @@ class OrganicInsightGenerator:
     def __init__(self, organic_df: pd.DataFrame, content_df: pd.DataFrame):
         self.organic_df  = organic_df
         self.content_df  = content_df
-        self.client = OpenAI(api_key=_get_openai_key())
         self.org_summary = _summarize_organic(organic_df)
         self.cnt_summary = _summarize_content(content_df)
 
@@ -192,31 +184,39 @@ class OrganicInsightGenerator:
         """
         state_key = f'ai_insight_{cache_key}'
 
-        # Return dari cache kalau sudah ada
         if state_key in st.session_state:
             return st.session_state[state_key]
 
+        # Baca key fresh setiap call — support Streamlit secrets
+        api_key = _get_openai_key()
+        if not api_key:
+            fallback = {
+                'insight'        : 'OpenAI API key not configured.',
+                'recommendation' : 'Add OPENAI_API_KEY to Streamlit secrets or .env file.',
+                'severity'       : 'warning',
+            }
+            st.session_state[state_key] = fallback
+            return fallback
+
         try:
-            response = self.client.chat.completions.create(
-                model      = MODEL,
-                max_tokens = MAX_TOKENS,
-                messages   = [
+            client   = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model          = MODEL,
+                max_tokens     = MAX_TOKENS,
+                messages       = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user"  , "content": user_prompt},
                 ],
-                response_format={"type": "json_object"},
+                response_format= {"type": "json_object"},
             )
 
             raw    = response.choices[0].message.content
             result = json.loads(raw)
 
-            # Validasi struktur
-            required = ['insight', 'recommendation', 'severity']
-            for key in required:
+            for key in ['insight', 'recommendation', 'severity']:
                 if key not in result:
                     result[key] = 'N/A'
 
-            # Simpan ke cache
             st.session_state[state_key] = result
             return result
 
@@ -457,7 +457,6 @@ class RevenueInsightGenerator:
 
     def __init__(self, ads_df: pd.DataFrame):
         self.df     = ads_df.copy()
-        self.client = OpenAI(api_key=_get_openai_key())
 
         if not ads_df.empty and 'date' in ads_df.columns:
             self.since = str(ads_df['date'].min())[:10]
@@ -492,8 +491,19 @@ Rules:
         if state_key in st.session_state:
             return st.session_state[state_key]
 
+        api_key = _get_openai_key()
+        if not api_key:
+            fallback = {
+                'insight'        : 'OpenAI API key not configured.',
+                'recommendation' : 'Add OPENAI_API_KEY to Streamlit secrets or .env file.',
+                'severity'       : 'warning',
+            }
+            st.session_state[state_key] = fallback
+            return fallback
+
         try:
-            response = self.client.chat.completions.create(
+            client   = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
                 model          = MODEL,
                 max_tokens     = MAX_TOKENS,
                 messages       = [
