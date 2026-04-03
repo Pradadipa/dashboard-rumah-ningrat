@@ -22,7 +22,25 @@ from openai import OpenAI
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+# Ganti bagian ini di ai_service.py
+
+import os
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Baca API key — support lokal (.env) dan Streamlit Cloud (secrets) ──
+def _get_openai_key() -> str:
+    # 1. Coba dari Streamlit secrets (Streamlit Cloud)
+    try:
+        return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        pass
+    # 2. Fallback ke environment variable / .env (lokal)
+    return os.getenv("OPENAI_API_KEY", "")
+
+OPENAI_API_KEY = _get_openai_key()
 MODEL          = 'gpt-4o-mini'
 MAX_TOKENS     = 600
 
@@ -155,7 +173,7 @@ class OrganicInsightGenerator:
     def __init__(self, organic_df: pd.DataFrame, content_df: pd.DataFrame):
         self.organic_df  = organic_df
         self.content_df  = content_df
-        self.client      = OpenAI(api_key=OPENAI_API_KEY)
+        self.client = OpenAI(api_key=_get_openai_key())
         self.org_summary = _summarize_organic(organic_df)
         self.cnt_summary = _summarize_content(content_df)
 
@@ -439,7 +457,7 @@ class RevenueInsightGenerator:
 
     def __init__(self, ads_df: pd.DataFrame):
         self.df     = ads_df.copy()
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.client = OpenAI(api_key=_get_openai_key())
 
         if not ads_df.empty and 'date' in ads_df.columns:
             self.since = str(ads_df['date'].min())[:10]
