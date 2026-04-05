@@ -69,18 +69,10 @@ FUNNEL_LABELS = {
 
 def fmt_idr(amount: float) -> str:
     """Format angka ke IDR."""
-    if amount >= 1_000_000_000:
-        return f"Rp {amount/1_000_000_000:.1f}B"
-    elif amount >= 1_000_000:
-        return f"Rp {amount/1_000_000:.1f}M"
-    elif amount >= 1_000:
-        return f"Rp {amount/1_000:.1f}K"
     return f"Rp {amount:,.0f}"
 
 def fmt_num(n: float) -> str:
-    if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
-    if n >= 1_000    : return f"{n/1_000:.1f}K"
-    return str(int(n))
+    return f"{int(n):,}"
 
 def get_funnel_stage(campaign_name: str) -> str:
     name = str(campaign_name).lower()
@@ -297,10 +289,37 @@ def render_campaign_terminal(df: pd.DataFrame):
         # Campaign rows
         for _, row in stage_camps.iterrows():
             cc = NEON_GREEN if row['ctr'] >= 2.0 else (NEON_YELLOW if row['ctr'] >= 1.0 else NEON_RED)
+
+            # Status badge
+            camp_status = row.get('status', 'UNKNOWN') if 'status' in row.index else 'UNKNOWN'
+            if camp_status == 'ACTIVE':
+                status_color = '#00FF88'
+                status_bg    = 'rgba(0,255,136,0.1)'
+                status_dot   = '&#9679;'
+            elif camp_status == 'PAUSED':
+                status_color = '#FFD700'
+                status_bg    = 'rgba(255,215,0,0.1)'
+                status_dot   = '&#9646;'
+            elif camp_status in ('ARCHIVED', 'DELETED'):
+                status_color = '#FF3B5C'
+                status_bg    = 'rgba(255,59,92,0.1)'
+                status_dot   = '&#9632;'
+            else:
+                status_color = '#8892A0'
+                status_bg    = 'rgba(136,146,160,0.1)'
+                status_dot   = '&#9711;'
+
+            status_badge = (
+                f'<span style="display:inline-block;padding:2px 7px;border-radius:20px;'
+                f'font-size:10px;font-weight:700;color:{status_color};background:{status_bg};">'
+                f'{status_dot} {camp_status}</span>'
+            )
+
             rows += (
                 f'<tr style="border-bottom:1px solid #1a2035;">'
                 f'<td style="padding:8px 12px;"></td>'
-                f'<td style="padding:8px 12px;font-size:13px;color:#f1f5f9;font-weight:500;">{row["campaign_name"]}</td>'
+                f'<td style="padding:8px 12px;font-size:13px;color:#f1f5f9;font-weight:500;">'
+                f'{row["campaign_name"]}'
                 f'<td style="padding:8px 12px;font-size:11px;color:#6b7280;">{row["portfolio"]}</td>'
                 f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#f1f5f9;">{fmt_idr(row["spend"])}</td>'
                 f'<td style="padding:8px 12px;text-align:right;font-size:13px;color:#f1f5f9;">{fmt_num(row["impressions"])}</td>'
@@ -561,7 +580,7 @@ def show_revenue_engineering():
         '<div style="width:4px;height:52px;border-radius:4px;background:linear-gradient(180deg,#00D4FF 0%,transparent 100%);box-shadow:0 0 14px rgba(0,212,255,0.6);flex-shrink:0;"></div>'
         '<div>'
         '<div style="font-size:10px;font-weight:700;letter-spacing:2.5px;color:#00D4FF;text-transform:uppercase;font-family:monospace;margin-bottom:5px;opacity:0.9;">MODULE 01 &nbsp;·&nbsp; FINANCIAL TERMINAL</div>'
-        '<div style="font-size:26px;font-weight:800;color:#FFFFFF;line-height:1.2;letter-spacing:-0.3px;">💹 Revenue Engineering</div>'
+        '<div style="font-size:26px;font-weight:800;color:#FFFFFF;line-height:1.2;letter-spacing:-0.3px;">💹 Paid Ads Campaign Performance</div>'
         '<div style="font-size:13px;color:#8892A0;margin-top:5px;line-height:1.5;">Ad Performance &amp; Spend Efficiency across all Portfolios</div>'
         '</div>'
         '</div>'
@@ -569,62 +588,111 @@ def show_revenue_engineering():
         '</div>'
     )
 
-    # ── Filters ───────────────────────────────────────────────────
-    col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
-
-    with col_f1:
-        date_range = st.selectbox(
-            "Time Range",
-            ["Last 7 Days", "Last 14 Days", "Last 30 Days", "All Time"],
-            index=3,
-            key="rev_date_range"
-        )
-
-    # Load data
+    # ── Load data dulu sebelum filter ────────────────────────────
     loader = DataLoader(portfolio='all')
     df_raw = loader.load_revenue_data()
 
     if df_raw.empty:
-        st.warning("""
-        ⚠️ Data ads belum tersedia.
-        Jalankan: `notebooks/update_data.ipynb` untuk fetch dari Meta API.
-        """)
+        st.warning("Data ads belum tersedia.")
         return
 
     df = prepare_ads_data(df_raw)
 
-    # Get portfolios
-    portfolios        = ['All Portfolios'] + sorted(df['portfolio'].unique().tolist())
+    # ── Filters row 1: Date + Portfolio + Stage ──────────────────
+    col_f1, col_f2, col_f3, col_f4 = st.columns([1.5, 1.5, 2, 2])
+
+    # Ambil min/max date dari data aktual
+    min_date = df['date'].min().date() if not df.empty else (datetime.now() - timedelta(days=30)).date()
+    max_date = df['date'].max().date() if not df.empty else datetime.now().date()
+
+    with col_f1:
+        since_date = st.date_input(
+            "From",
+            value     = min_date,
+            min_value = min_date,
+            max_value = max_date,
+            key       = "rev_since_date",
+        )
     with col_f2:
+        until_date = st.date_input(
+            "To",
+            value     = max_date,
+            min_value = min_date,
+            max_value = max_date,
+            key       = "rev_until_date",
+        )
+
+    portfolios = ['All Portfolios'] + sorted(df['portfolio'].unique().tolist())
+    with col_f3:
         selected_port = st.selectbox(
             "Portfolio",
             portfolios,
             key="rev_portfolio"
         )
-    with col_f3:
+    with col_f4:
         selected_stage = st.selectbox(
             "Funnel Stage",
             ["All Stages", "TOF", "MOF", "BOF", "RET"],
             key="rev_funnel_stage"
         )
 
+    # ── Filters row 2: Campaign Status ───────────────────────────
+    # Ambil status yang tersedia dari data
+    has_status   = 'status' in df.columns and df['status'].nunique() > 0
+    status_options = ['All Status']
+    if has_status:
+        # Normalize status dari Meta API: ACTIVE, PAUSED, ARCHIVED, DELETED
+        available_statuses = sorted(df['status'].dropna().unique().tolist())
+        status_options += available_statuses
+
+    col_s1, col_s2 = st.columns([2, 4])
+    with col_s1:
+        selected_status = st.selectbox(
+            "Campaign Status",
+            status_options,
+            key="rev_campaign_status"
+        )
+
+    # ── Tampilkan date range yang dipilih ─────────────────────────
+    since_dt = pd.Timestamp(since_date)
+    until_dt = pd.Timestamp(until_date)
+    n_days   = (until_date - since_date).days + 1
+
+    # # Hitung total campaign per status untuk info
+    # if has_status:
+    #     status_counts = df['status'].value_counts().to_dict()
+    #     status_info   = " · ".join([
+    #         f'<span style="color:{"#00FF88" if s == "ACTIVE" else "#FF3B5C" if s in ["PAUSED","ARCHIVED"] else "#8892A0"};">'
+    #         f'{s}: {c}</span>'
+    #         for s, c in status_counts.items()
+    #     ])
+    #     date_banner_extra = f' &nbsp;|&nbsp; {status_info}'
+    # else:
+    #     date_banner_extra = ''
+
+    st.markdown(
+        f'<div style="margin:8px 0 16px 0;padding:8px 14px;background:rgba(0,212,255,0.05);'
+        f'border:1px solid rgba(0,212,255,0.15);border-radius:8px;font-size:12px;color:#8892A0;">'
+        f'Showing data from <span style="color:#00D4FF;font-weight:600;">'
+        f'{since_date.strftime("%d %b %Y")}</span> to '
+        f'<span style="color:#00D4FF;font-weight:600;">'
+        f'{until_date.strftime("%d %b %Y")}</span> '
+        f'<span style="color:#5A6577;">({n_days} days)</span>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
     # ── Apply filters ─────────────────────────────────────────────
-    days_map = {
-        "Last 7 Days" : 7,
-        "Last 14 Days": 14,
-        "Last 30 Days": 30,
-        "All Time"    : 9999,
-    }
-    days = days_map.get(date_range, 9999)
-    if days < 9999:
-        cutoff = df['date'].max() - timedelta(days=days)
-        df     = df[df['date'] >= cutoff]
+    df = df[(df['date'] >= since_dt) & (df['date'] <= until_dt)]
 
     if selected_port != 'All Portfolios':
         df = df[df['portfolio'] == selected_port]
 
     if selected_stage != 'All Stages':
         df = df[df['funnel_stage'] == selected_stage]
+
+    if selected_status != 'All Status' and has_status:
+        df = df[df['status'] == selected_status]
 
     if df.empty:
         st.info("Tidak ada data untuk filter yang dipilih.")

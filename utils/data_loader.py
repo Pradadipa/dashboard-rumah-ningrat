@@ -1,54 +1,338 @@
 """
 utils/data_loader.py
 ====================
-Centralized data loading untuk semua module dashboard.
-Updated untuk support:
-- Multi-portfolio (Portfolio 1 & 2)
-- Real data dari meta_api.py + transformer.py
-- Cache management
-- Graceful fallback ke dummy data
+Hybrid Data Loader — fetch langsung dari Meta API, cache di session.
+
+Flow:
+    User klik module
+        ↓
+    Cek st.cache_data (TTL 3 jam)
+        ↓ cache hit → langsung render
+        ↓ cache miss → fetch Meta API → transform → cache → render
 
 Usage:
     from utils.data_loader import DataLoader
 
-    loader = DataLoader(portfolio='all')        # semua portfolio
-    loader = DataLoader(portfolio='Portfolio 1') # 1 portfolio saja
-
+    loader     = DataLoader(portfolio='all', days=30)
     organic_df = loader.load_organic_data()
     content_df = loader.load_content_library()
     ads_df     = loader.load_revenue_data()
 """
 
 import os
+import sys
 import pandas as pd
 import streamlit as st
-from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load .env untuk development lokal
+# Di Streamlit Cloud, credentials dibaca dari st.secrets
+load_dotenv()
+
+CACHE_TTL = 3 * 3600  # 3 jam dalam detik
 
 
 # ══════════════════════════════════════════════════════════════════
-# CONSTANTS
+# HELPERS: Baca credentials
 # ══════════════════════════════════════════════════════════════════
 
-DATA_DIR       = Path("data/processed")
-RAW_DIR        = Path("data/raw")
+def _get_secret(key: str) -> str:
+    """Baca secret — support Streamlit Cloud & .env lokal."""
+    try:
+        val = st.secrets.get(key, "")
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    return os.getenv(key, "")
 
-# Mapping file → kolom date
-DATE_COLS = {
-    'organic_data.csv'       : 'date',
-    'content_library.csv'    : 'date',
-    'revenue_data.csv'       : 'date',
-    'cohort_data.csv'        : 'acquisition_date',
-    'funnel_data.csv'        : 'date',
-    'funnel_module3_data.csv': 'date',
-    'funnel_by_device.csv'   : 'date',
-    'funnel_by_source.csv'   : 'date',
-    'page_speed_data.csv'    : 'date',
-    'traffic_data.csv'       : 'date',
-    'revops_data.csv'        : 'date',
-    'social_data.csv'        : 'date',
-}
+
+def _get_portfolio_configs() -> list:
+    """
+    Baca semua portfolio config dari secrets/.env.
+    Return: list of dict [{num, name, access_token, ...}]
+    """
+    configs = []
+    for num in [1, 2]:
+        name         = _get_secret(f'PORTFOLIO_{num}_NAME')
+        access_token = _get_secret(f'PORTFOLIO_{num}_ACCESS_TOKEN')
+        if name and access_token:
+            configs.append({
+                'num'           : num,
+                'name'          : name,
+                'app_id'        : _get_secret(f'PORTFOLIO_{num}_META_APP_ID'),
+                'app_secret'    : _get_secret(f'PORTFOLIO_{num}_META_APP_SECRET'),
+                'access_token'  : access_token,
+                'ad_account_id' : _get_secret(f'PORTFOLIO_{num}_AD_ACCOUNT_ID'),
+                'fb_page_id'    : _get_secret(f'PORTFOLIO_{num}_FB_PAGE_ID'),
+                'ig_account_id' : _get_secret(f'PORTFOLIO_{num}_IG_ACCOUNT_ID'),
+            })
+    return configs
+
+
+def _date_range(days: int) -> tuple:
+    """Return (since, until) string untuk N hari terakhir."""
+    until = datetime.now()
+    since = until - timedelta(days=days)
+    return since.strftime('%Y-%m-%d'), until.strftime('%Y-%m-%d')
+
+
+# ══════════════════════════════════════════════════════════════════
+# CORE: Fetch + Transform per portfolio
+# ══════════════════════════════════════════════════════════════════
+
+def _fetch_one_portfolio(config: dict, since: str, until: str,
+                          posts_goal_weekly: int = 4) -> dict:
+    """
+    Fetch semua data dari 1 portfolio via Meta API.
+    Return: dict {ig_organic, ig_posts, fb_organic, fb_posts, ads}
+    """
+    from connectors.meta_api import MetaConnector
+    connector = MetaConnector(portfolio_num=config['num'])
+    return connector.fetch_all(
+        since             = since,
+        until             = until,
+        posts_goal_weekly = posts_goal_weekly,
+    )
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _fetch_and_transform_all(
+    portfolio_filter : str,
+    since            : str,
+    until            : str,
+    posts_goal_weekly: int = 4,
+) -> dict:
+    """
+    Fetch + transform semua portfolio, cache hasilnya.
+    Dipanggil per module — cache shared antar module.
+
+    Return: dict {
+        'organic'         : DataFrame,
+        'content_library' : DataFrame,
+        'ads'             : DataFrame,
+        'portfolios'      : list[str],
+        'fetched_at'      : str,
+    }
+    """
+    from data.transformer import DataTransformer
+
+    configs = _get_portfolio_configs()
+    if not configs:
+        return {
+            'organic'        : pd.DataFrame(),
+            'content_library': pd.DataFrame(),
+            'ads'            : pd.DataFrame(),
+            'portfolios'     : [],
+            'fetched_at'     : datetime.now().isoformat(),
+        }
+
+    # Filter portfolio jika bukan 'all'
+    if portfolio_filter != 'all':
+        configs = [c for c in configs if c['name'] == portfolio_filter]
+
+    all_raw     = {}
+    transformer = DataTransformer(output_dir=None)  # tidak simpan ke CSV
+
+    for config in configs:
+        try:
+            raw = _fetch_one_portfolio(config, since, until, posts_goal_weekly)
+            all_raw[config['num']] = raw
+        except Exception as e:
+            st.warning(f"Portfolio {config['name']} fetch error: {e}")
+            all_raw[config['num']] = None
+
+    # Transform semua portfolio jadi 1 unified DataFrame
+    results = transformer.transform_all_portfolios(all_raw, save=False)
+
+    return {
+        'organic'        : results.get('organic',          pd.DataFrame()),
+        'content_library': results.get('content_library',  pd.DataFrame()),
+        'ads'            : _load_ads_fallback(since, until, portfolio_filter),
+        'portfolios'     : [c['name'] for c in configs],
+        'fetched_at'     : datetime.now().isoformat(),
+    }
+
+
+def _fetch_ads_from_api(since: str, until: str, portfolio_filter: str) -> pd.DataFrame:
+    """
+    Fetch ads data langsung dari Meta Ads API.
+    Dipanggil saat CSV tidak ada atau sengaja direct fetch.
+    """
+    try:
+        from connectors.meta_api import MetaConnector
+        configs = _get_portfolio_configs()
+        if portfolio_filter != 'all':
+            configs = [c for c in configs if c['name'] == portfolio_filter]
+        if not configs:
+            return pd.DataFrame()
+
+        dfs = []
+        for config in configs:
+            try:
+                connector = MetaConnector(portfolio_num=config['num'])
+                ads_df    = connector.ads.fetch_insights(since, until)
+                if not ads_df.empty:
+                    dfs.append(ads_df)
+            except Exception as e:
+                st.warning(f"Ads fetch error ({config['name']}): {e}")
+                continue
+
+        if not dfs:
+            return pd.DataFrame()
+
+        df = pd.concat(dfs, ignore_index=True)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.dropna(subset=['date'])
+        return df.sort_values(['date', 'portfolio']).reset_index(drop=True)
+
+    except Exception as e:
+        st.warning(f"Ads API error: {e}")
+        return pd.DataFrame()
+
+
+def _fetch_tiktok_content(since: str, until: str,
+                           portfolio_filter: str) -> pd.DataFrame:
+    """
+    Fetch TikTok content dari Google Sheets.
+    Filter by date range dan portfolio.
+    Return empty DataFrame kalau gagal (non-blocking).
+    """
+    try:
+        from connectors.tiktok_sheets import TikTokSheetsConnector
+        connector = TikTokSheetsConnector()
+        df        = connector.fetch()
+
+        if df.empty:
+            st.warning("TikTok: Data kosong dari Google Sheets.")
+            return pd.DataFrame()
+
+        # Filter date — pastikan semua dalam Timestamp
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+
+            if df.empty:
+                st.warning("TikTok: Semua baris memiliki date tidak valid.")
+                return pd.DataFrame()
+
+            since_dt  = pd.Timestamp(since)
+            until_dt  = pd.Timestamp(until)
+            df_filtered = df[(df['date'] >= since_dt) & (df['date'] <= until_dt)]
+
+            if df_filtered.empty:
+                st.info(
+                    f"TikTok: {len(df)} baris ditemukan di sheet, tapi tidak ada "
+                    f"yang masuk range {since} s/d {until}. "
+                    f"Date di sheet: {df['date'].min().date()} s/d {df['date'].max().date()}"
+                )
+                return pd.DataFrame()
+
+            df = df_filtered
+
+        # Filter portfolio
+        if portfolio_filter != 'all' and 'portfolio' in df.columns:
+            df_port = df[df['portfolio'] == portfolio_filter]
+            if df_port.empty:
+                st.info(
+                    f"TikTok: Tidak ada data untuk portfolio '{portfolio_filter}'. "
+                    f"Portfolio di sheet: {df['portfolio'].unique().tolist()}"
+                )
+                return pd.DataFrame()
+            df = df_port
+
+        return df.reset_index(drop=True)
+
+    except Exception as e:
+        # Tampilkan error supaya bisa di-debug
+        st.warning(f"TikTok fetch error: {type(e).__name__}: {e}")
+        return pd.DataFrame()
+
+
+def _fetch_tiktok_organic(since: str, until: str,
+                           portfolio_filter: str) -> pd.DataFrame:
+    """
+    Fetch TikTok organic data dari Google Sheets.
+    Non-blocking — return empty DataFrame kalau gagal.
+    """
+    try:
+        from connectors.tiktok_organic_sheets import TikTokOrganicConnector
+        connector = TikTokOrganicConnector()
+        df        = connector.fetch()
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Filter date
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+            since_dt = pd.Timestamp(since)
+            until_dt = pd.Timestamp(until)
+            df_filtered = df[(df['date'] >= since_dt) & (df['date'] <= until_dt)]
+
+            if df_filtered.empty:
+                st.info(
+                    f"TikTok Organic: {len(df)} baris ditemukan tapi tidak ada "
+                    f"yang masuk range {since} s/d {until}. "
+                    f"Range di sheet: {df['date'].min().date()} s/d {df['date'].max().date()}"
+                )
+                return pd.DataFrame()
+            df = df_filtered
+
+        # Filter portfolio
+        if portfolio_filter != 'all' and 'portfolio' in df.columns:
+            df_port = df[df['portfolio'] == portfolio_filter]
+            if df_port.empty:
+                st.info(
+                    f"TikTok Organic: Tidak ada data untuk portfolio '{portfolio_filter}'. "
+                    f"Portfolio di sheet: {df['portfolio'].unique().tolist()}"
+                )
+                return pd.DataFrame()
+            df = df_port
+
+        return df.reset_index(drop=True)
+
+    except Exception as e:
+        st.warning(f"TikTok Organic fetch error: {type(e).__name__}: {e}")
+        return pd.DataFrame()
+
+
+def _load_ads_fallback(since: str, until: str, portfolio_filter: str) -> pd.DataFrame:
+    """
+    Load ads data — fetch dari Meta Ads API langsung.
+    Fallback ke CSV lokal kalau API gagal.
+    """
+    # 1. Coba fetch dari API dulu
+    df = _fetch_ads_from_api(since, until, portfolio_filter)
+    if not df.empty:
+        return df
+
+    # 2. Fallback ke CSV kalau API gagal
+    from pathlib import Path
+    raw_paths = [
+        Path('data/raw/all_meta_ads.csv'),
+        Path('data/processed/revenue_data.csv'),
+    ]
+    for path in raw_paths:
+        if path.exists():
+            try:
+                df = pd.read_csv(path)
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                if portfolio_filter != 'all' and 'portfolio' in df.columns:
+                    df = df[df['portfolio'] == portfolio_filter]
+                since_dt = pd.Timestamp(since)
+                until_dt = pd.Timestamp(until)
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                df = df.dropna(subset=['date'])
+                df = df[(df['date'] >= since_dt) & (df['date'] <= until_dt)]
+                return df.reset_index(drop=True)
+            except Exception:
+                continue
+
+    return pd.DataFrame()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -57,360 +341,221 @@ DATE_COLS = {
 
 class DataLoader:
     """
-    Centralized data loader dengan support:
-    - Multi-portfolio filter
-    - Cache management
-    - Graceful error handling
+    Hybrid data loader:
+    - Fetch dari Meta API langsung (tidak perlu CSV lokal)
+    - Cache hasil di st.cache_data selama 3 jam
+    - Fetch per module saat pertama kali dibuka
+    - Loading spinner + progress text saat fetch
     """
 
-    def __init__(self, portfolio: str = 'all'):
+    def __init__(self, portfolio: str = 'all', days: int = 30,
+                 posts_goal_weekly: int = 4):
         """
         Args:
-            portfolio : 'all' untuk semua portfolio,
-                        atau nama portfolio spesifik
-                        contoh: 'Rumah Ningrat Subang'
+            portfolio         : 'all' atau nama portfolio spesifik
+            days              : N hari terakhir yang di-fetch
+            posts_goal_weekly : Target post per minggu
         """
-        self.data_dir  = DATA_DIR
-        self.raw_dir   = RAW_DIR
-        self.portfolio = portfolio
+        self.portfolio         = portfolio
+        self.days              = days
+        self.posts_goal_weekly = posts_goal_weekly
+        self.since, self.until = _date_range(days)
 
-    # ──────────────────────────────────────────────────────────────
-    # PRIVATE: _load()
-    # Core loader dengan error handling & portfolio filter
-    # ──────────────────────────────────────────────────────────────
-
-    def _load(self, filename: str,
-              date_col: Optional[str] = None,
-              filter_portfolio: bool = True) -> pd.DataFrame:
+    def _get_data(self) -> dict:
         """
-        Load CSV dari data/processed/ dengan error handling.
-
-        Args:
-            filename         : nama file CSV
-            date_col         : kolom tanggal yang perlu diparse
-            filter_portfolio : apply portfolio filter atau tidak
-
-        Return: DataFrame atau DataFrame kosong jika error
+        Ambil data — dari cache kalau ada, fetch kalau tidak.
+        Tampilkan spinner saat fetch berlangsung.
         """
-        path = self.data_dir / filename
+        # Key cache unik per kombinasi portfolio + date range
+        cache_key = f"data_{self.portfolio}_{self.since}_{self.until}"
 
-        if not path.exists():
-            return pd.DataFrame()
+        # Cek session_state cache dulu (lebih cepat dari st.cache_data check)
+        if cache_key in st.session_state:
+            cached = st.session_state[cache_key]
+            fetched_at = datetime.fromisoformat(cached.get('fetched_at', '2000-01-01'))
+            age_hours  = (datetime.now() - fetched_at).total_seconds() / 3600
+            if age_hours < 3:
+                return cached
 
-        try:
-            df = pd.read_csv(path)
+        # Cache miss — fetch dari API dengan progress indicator
+        with st.spinner(''):
+            # Progress container
+            progress_placeholder = st.empty()
 
-            # Parse date column
-            col = date_col or DATE_COLS.get(filename)
-            if col and col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+            def update_progress(msg: str):
+                progress_placeholder.markdown(
+                    f'<div style="padding:12px 16px;background:rgba(0,212,255,0.05);'
+                    f'border:1px solid rgba(0,212,255,0.2);border-radius:8px;'
+                    f'font-size:13px;color:#8892A0;">'
+                    f'<span style="color:#00D4FF;">&#9650;</span> {msg}</div>',
+                    unsafe_allow_html=True
+                )
 
-            # Apply portfolio filter
-            if filter_portfolio and self.portfolio != 'all':
-                if 'portfolio' in df.columns:
-                    df = df[df['portfolio'] == self.portfolio].reset_index(drop=True)
+            update_progress('Connecting to Meta API...')
 
+            try:
+                configs = _get_portfolio_configs()
+                if not configs:
+                    progress_placeholder.empty()
+                    return self._empty_result()
+
+                port_filter = self.portfolio
+                if port_filter != 'all':
+                    configs = [c for c in configs if c['name'] == port_filter]
+
+                from data.transformer import DataTransformer
+                transformer = DataTransformer(output_dir=None)
+                all_raw     = {}
+
+                for i, config in enumerate(configs):
+                    update_progress(
+                        f'Fetching {config["name"]} '
+                        f'({i+1}/{len(configs)}) — Instagram organic...'
+                    )
+                    try:
+                        raw = _fetch_one_portfolio(
+                            config, self.since, self.until, self.posts_goal_weekly
+                        )
+                        all_raw[config['num']] = raw
+                    except Exception as e:
+                        st.warning(f"Portfolio {config['name']}: {e}")
+                        all_raw[config['num']] = None
+
+                update_progress('Transforming data...')
+                results = transformer.transform_all_portfolios(all_raw, save=False)
+
+                update_progress('Fetching TikTok organic from Google Sheets...')
+                tiktok_organic = _fetch_tiktok_organic(
+                    self.since, self.until, self.portfolio
+                )
+                meta_organic   = results.get('organic', pd.DataFrame())
+                if not tiktok_organic.empty:
+                    if not meta_organic.empty and 'date' in meta_organic.columns:
+                        meta_organic['date'] = pd.to_datetime(meta_organic['date'], errors='coerce')
+                    tiktok_organic['date'] = pd.to_datetime(tiktok_organic['date'], errors='coerce')
+                    merged_organic = pd.concat(
+                        [meta_organic, tiktok_organic], ignore_index=True
+                    ).sort_values(['date', 'platform']).reset_index(drop=True)
+                    results['organic'] = merged_organic
+
+                update_progress('Fetching Meta Ads insights...')
+                ads_df = _fetch_ads_from_api(self.since, self.until, self.portfolio)
+                if ads_df.empty:
+                    update_progress('Loading ads data from local cache...')
+                    ads_df = _load_ads_fallback(self.since, self.until, self.portfolio)
+
+                update_progress('Fetching TikTok data from Google Sheets...')
+                tiktok_df      = _fetch_tiktok_content(
+                    self.since, self.until, self.portfolio
+                )
+                meta_content   = results.get('content_library', pd.DataFrame())
+                if not tiktok_df.empty:
+                    # Pastikan date sudah datetime sebelum concat & sort
+                    for _df in [meta_content, tiktok_df]:
+                        if not _df.empty and 'date' in _df.columns:
+                            _df['date'] = pd.to_datetime(_df['date'], errors='coerce')
+                    content_library = pd.concat(
+                        [meta_content, tiktok_df], ignore_index=True
+                    ).sort_values('date', ascending=False).reset_index(drop=True)
+                else:
+                    content_library = meta_content
+                    if not content_library.empty and 'date' in content_library.columns:
+                        content_library['date'] = pd.to_datetime(
+                            content_library['date'], errors='coerce'
+                        )
+
+                data = {
+                    'organic'        : results.get('organic',  pd.DataFrame()),
+                    'content_library': content_library,
+                    'ads'            : ads_df,
+                    'portfolios'     : [c['name'] for c in configs],
+                    'fetched_at'     : datetime.now().isoformat(),
+                }
+
+                # Simpan ke session_state
+                st.session_state[cache_key] = data
+                progress_placeholder.empty()
+                return data
+
+            except Exception as e:
+                progress_placeholder.empty()
+                st.error(f'Failed to fetch data: {e}')
+                return self._empty_result()
+
+    def _empty_result(self) -> dict:
+        return {
+            'organic'        : pd.DataFrame(),
+            'content_library': pd.DataFrame(),
+            'ads'            : pd.DataFrame(),
+            'portfolios'     : [],
+            'fetched_at'     : datetime.now().isoformat(),
+        }
+
+    def _filter_portfolio(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Filter DataFrame berdasarkan portfolio yang dipilih."""
+        if df.empty or self.portfolio == 'all':
             return df
-
-        except Exception as e:
-            st.warning(f"⚠️ Error loading {filename}: {e}")
-            return pd.DataFrame()
-
-    # ──────────────────────────────────────────────────────────────
-    # PRIVATE: _filter_date()
-    # Filter DataFrame berdasarkan date range
-    # ──────────────────────────────────────────────────────────────
-
-    def _filter_date(self, df: pd.DataFrame,
-                     date_col: str = 'date',
-                     days: Optional[int] = None,
-                     since: Optional[str] = None,
-                     until: Optional[str] = None) -> pd.DataFrame:
-        """
-        Filter DataFrame berdasarkan date range.
-
-        Args:
-            days  : N hari terakhir (opsional)
-            since : 'YYYY-MM-DD' start date (opsional)
-            until : 'YYYY-MM-DD' end date (opsional)
-        """
-        if df.empty or date_col not in df.columns:
-            return df
-
-        if days:
-            cutoff = datetime.now() - timedelta(days=days)
-            df = df[df[date_col] >= cutoff]
-        if since:
-            df = df[df[date_col] >= pd.to_datetime(since)]
-        if until:
-            df = df[df[date_col] <= pd.to_datetime(until)]
-
-        return df.reset_index(drop=True)
+        if 'portfolio' in df.columns:
+            return df[df['portfolio'] == self.portfolio].reset_index(drop=True)
+        return df
 
     # ──────────────────────────────────────────────────────────────
-    # PUBLIC: Module 2 — Organic Architecture
+    # PUBLIC: load methods
     # ──────────────────────────────────────────────────────────────
 
-    @st.cache_data(ttl=3600)  # cache 1 jam
-    def load_organic_data(_self,
-                          days: Optional[int] = None,
-                          since: Optional[str] = None,
-                          until: Optional[str] = None) -> pd.DataFrame:
-        """
-        Load organic_data.csv untuk Organic Architecture module.
+    def load_organic_data(self, days: Optional[int] = None) -> pd.DataFrame:
+        """Load organic data — fetch dari API kalau belum di-cache."""
+        data = self._get_data()
+        df   = self._filter_portfolio(data.get('organic', pd.DataFrame()))
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+            if days:
+                cutoff = pd.Timestamp(datetime.now() - timedelta(days=days))
+                df = df[df['date'] >= cutoff]
+        return df.sort_values('date').reset_index(drop=True) if not df.empty else df
 
-        Kolom: date, platform, portfolio, followers, follower_growth,
-               impressions, profile_visits, link_clicks, views,
-               likes, comments, shares, saves,
-               posts_published, posts_goal_weekly
+    def load_content_library(self, days: Optional[int] = None) -> pd.DataFrame:
+        """Load content library — fetch dari API kalau belum di-cache."""
+        data = self._get_data()
+        df   = self._filter_portfolio(data.get('content_library', pd.DataFrame()))
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+            if days:
+                cutoff = pd.Timestamp(datetime.now() - timedelta(days=days))
+                df = df[df['date'] >= cutoff]
+            for col in ['virality_score', 'conversion_score']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        return df.sort_values('date', ascending=False).reset_index(drop=True) if not df.empty else df
 
-        Args:
-            days  : filter N hari terakhir
-            since : filter start date 'YYYY-MM-DD'
-            until : filter end date 'YYYY-MM-DD'
-        """
-        df = _self._load('organic_data.csv', date_col='date')
-
-        if df.empty:
-            return df
-
-        return _self._filter_date(df, 'date', days, since, until)
-
-    @st.cache_data(ttl=3600)
-    def load_content_library(_self,
-                             days: Optional[int] = None,
-                             since: Optional[str] = None,
-                             until: Optional[str] = None) -> pd.DataFrame:
-        """
-        Load content_library.csv untuk Content Library section.
-
-        Kolom: date, platform, portfolio, title, content_type,
-               views, likes, comments, shares, saves, link_clicks,
-               virality_score, conversion_score, permalink, thumbnail
-        """
-        df = _self._load('content_library.csv', date_col='date')
-
-        if df.empty:
-            return df
-
-        # Pastikan score columns numeric
-        for col in ['virality_score', 'conversion_score']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        return _self._filter_date(df, 'date', days, since, until)
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: Module 1 — Revenue Engineering
-    # ──────────────────────────────────────────────────────────────
-
-    @st.cache_data(ttl=3600)
-    def load_revenue_data(_self,
-                          days: Optional[int] = None,
-                          since: Optional[str] = None,
-                          until: Optional[str] = None) -> pd.DataFrame:
-        """
-        Load ads data untuk Revenue Engineering module.
-        Prioritas: data/processed/revenue_data.csv
-        Fallback : data/raw/all_meta_ads.csv
-        """
-        # Coba processed dulu
-        df = _self._load('all_meta_ads.csv', date_col='date')
-
-        # Fallback ke raw all_meta_ads.csv
-        if df.empty:
-            raw_path = _self.raw_dir / 'all_meta_ads.csv'
-            if raw_path.exists():
-                try:
-                    df = pd.read_csv(raw_path)
-                    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-                    if _self.portfolio != 'all' and 'portfolio' in df.columns:
-                        df = df[df['portfolio'] == _self.portfolio].reset_index(drop=True)
-                except Exception as e:
-                    st.warning(f"Error loading all_meta_ads.csv: {e}")
-                    return pd.DataFrame()
-
-        if df.empty:
-            return df
-
-        # Pastikan numeric columns
-        numeric_cols = ['spend', 'impressions', 'reach', 'clicks',
-                        'cpm', 'cpc', 'ctr', 'purchases', 'revenue', 'roas', 'cpa']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        return _self._filter_date(df, 'date', days, since, until)
-
-    @st.cache_data(ttl=3600)
-    def load_cohort_data(_self) -> pd.DataFrame:
-        """Load cohort_data.csv untuk LTV Cohort Analysis."""
-        return _self._load('cohort_data.csv',
-                           date_col='acquisition_date',
-                           filter_portfolio=False)
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: Module 3 — CRO Terminal
-    # ──────────────────────────────────────────────────────────────
-
-    @st.cache_data(ttl=3600)
-    def load_funnel_data(_self) -> pd.DataFrame:
-        """Load funnel_data.csv untuk CRO Terminal."""
-        return _self._load('funnel_data.csv', date_col='date',
-                           filter_portfolio=False)
-
-    @st.cache_data(ttl=3600)
-    def load_funnel_module3_data(_self) -> pd.DataFrame:
-        """Load funnel_module3_data.csv untuk CRO Terminal."""
-        return _self._load('funnel_module3_data.csv', date_col='date',
-                           filter_portfolio=False)
-
-    @st.cache_data(ttl=3600)
-    def load_funnel_by_device(_self) -> pd.DataFrame:
-        """Load funnel_by_device.csv untuk CRO Terminal."""
-        return _self._load('funnel_by_device.csv', date_col='date',
-                           filter_portfolio=False)
-
-    @st.cache_data(ttl=3600)
-    def load_funnel_by_source(_self) -> pd.DataFrame:
-        """Load funnel_by_source.csv untuk CRO Terminal."""
-        return _self._load('funnel_by_source.csv', date_col='date',
-                           filter_portfolio=False)
-
-    @st.cache_data(ttl=3600)
-    def load_page_speed_data(_self) -> pd.DataFrame:
-        """Load page_speed_data.csv untuk CRO Terminal."""
-        return _self._load('page_speed_data.csv', date_col='date',
-                           filter_portfolio=False)
-
-    @st.cache_data(ttl=3600)
-    def load_traffic_data(_self) -> pd.DataFrame:
-        """Load traffic_data.csv untuk CRO Terminal."""
-        return _self._load('traffic_data.csv', date_col='date',
-                           filter_portfolio=False)
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: Module 4 — RevOps
-    # ──────────────────────────────────────────────────────────────
-
-    @st.cache_data(ttl=3600)
-    def load_revops_data(_self) -> pd.DataFrame:
-        """Load revops_data.csv untuk RevOps module."""
-        return _self._load('revops_data.csv', date_col='date',
-                           filter_portfolio=False)
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: get_portfolios()
-    # Ambil list semua portfolio yang tersedia
-    # ──────────────────────────────────────────────────────────────
+    def load_revenue_data(self, days: Optional[int] = None) -> pd.DataFrame:
+        """Load ads data — CSV kalau ada, Meta API kalau tidak."""
+        data = self._get_data()
+        df   = self._filter_portfolio(data.get('ads', pd.DataFrame()))
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+            if days:
+                cutoff = pd.Timestamp(datetime.now() - timedelta(days=days))
+                df = df[df['date'] >= cutoff]
+            for col in ['spend', 'impressions', 'clicks', 'cpm', 'cpc', 'ctr']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        return df.sort_values('date').reset_index(drop=True) if not df.empty else df
 
     def get_portfolios(self) -> list:
-        """
-        Ambil list semua portfolio yang tersedia di data.
-        Dipakai untuk dropdown/toggle di Streamlit sidebar.
-
-        Return: list nama portfolio, contoh:
-                ['Rumah Ningrat Subang', 'Rumah Ningrat Pejambon']
-        """
-        path = self.data_dir / 'organic_data.csv'
-        if not path.exists():
-            return []
-
-        try:
-            df = pd.read_csv(path, usecols=['portfolio'])
-            return sorted(df['portfolio'].dropna().unique().tolist())
-        except Exception:
-            return []
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: refresh_cache()
-    # Clear semua cache — dipanggil setelah fetch data baru
-    # ──────────────────────────────────────────────────────────────
+        """Ambil list semua portfolio yang tersedia."""
+        configs = _get_portfolio_configs()
+        return [c['name'] for c in configs]
 
     @staticmethod
     def refresh_cache():
-        """
-        Clear semua Streamlit cache.
-        Panggil ini setelah fetch & transform data baru
-        supaya dashboard menampilkan data terbaru.
-
-        Usage:
-            if st.button('🔄 Refresh Data'):
-                DataLoader.refresh_cache()
-                st.rerun()
-        """
+        """Clear semua cache — paksa fetch ulang dari API."""
+        # Clear session_state cache
+        keys_to_delete = [k for k in st.session_state if k.startswith('data_')]
+        for k in keys_to_delete:
+            del st.session_state[k]
+        # Clear st.cache_data
         st.cache_data.clear()
-        st.success('✅ Cache cleared — data refreshed!')
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: get_data_status()
-    # Cek status semua file data
-    # ──────────────────────────────────────────────────────────────
-
-    def get_data_status(self) -> dict:
-        """
-        Cek status semua file data — tersedia atau tidak.
-        Dipakai untuk debug dan status indicator di sidebar.
-
-        Return: dict {filename: {exists, rows, last_modified}}
-        """
-        files = list(DATE_COLS.keys())
-        status = {}
-
-        for filename in files:
-            path = self.data_dir / filename
-            if path.exists():
-                try:
-                    df            = pd.read_csv(path, nrows=1)
-                    full_df       = pd.read_csv(path)
-                    last_modified = datetime.fromtimestamp(
-                        path.stat().st_mtime
-                    ).strftime('%Y-%m-%d %H:%M')
-                    status[filename] = {
-                        'exists'       : True,
-                        'rows'         : len(full_df),
-                        'last_modified': last_modified,
-                    }
-                except Exception as e:
-                    status[filename] = {
-                        'exists': True,
-                        'rows'  : 0,
-                        'error' : str(e),
-                    }
-            else:
-                status[filename] = {
-                    'exists': False,
-                    'rows'  : 0,
-                }
-
-        return status
-
-    # ──────────────────────────────────────────────────────────────
-    # PUBLIC: load_all()
-    # Load semua data sekaligus — untuk preloading
-    # ──────────────────────────────────────────────────────────────
-
-    def load_all(self,
-                 days: Optional[int] = 30,
-                 since: Optional[str] = None,
-                 until: Optional[str] = None) -> dict:
-        """
-        Load semua dataset sekaligus.
-
-        Return: dict {
-            'organic'         : DataFrame,
-            'content_library' : DataFrame,
-            'revenue'         : DataFrame,
-            'cohort'          : DataFrame,
-            'funnel'          : DataFrame,
-            'revops'          : DataFrame,
-        }
-        """
-        return {
-            'organic'         : self.load_organic_data(days, since, until),
-            'content_library' : self.load_content_library(days, since, until),
-            'revenue'         : self.load_revenue_data(days, since, until),
-            'cohort'          : self.load_cohort_data(),
-            'funnel'          : self.load_funnel_data(),
-            'revops'          : self.load_revops_data(),
-        }

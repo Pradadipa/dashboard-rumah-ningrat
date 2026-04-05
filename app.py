@@ -24,7 +24,7 @@ def render_sidebar():
 
     page = st.sidebar.radio(
         "Navigation",
-        ["Revenue Engineering", "Organic Architecture"],
+        ["Paid Ads Campaign Performance", "Social Media Performance"],
         label_visibility="collapsed",
     )
 
@@ -34,10 +34,10 @@ def main():
     load_css()
     page = render_sidebar()
 
-    if page == "Revenue Engineering":
+    if page == "Paid Ads Campaign Performance":
         from modules.revenue_engineering import show_revenue_engineering
         show_revenue_engineering()
-    elif page == "Organic Architecture":
+    elif page == "Social Media Performance":
         from modules.organic_architecture import show_organic_architecture
         show_organic_architecture()
 

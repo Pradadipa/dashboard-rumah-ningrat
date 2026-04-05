@@ -69,7 +69,9 @@ class DataTransformer:
 
     def __init__(self, output_dir: str = OUTPUT_DIR):
         self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        # Hanya buat folder kalau output_dir di-set (bukan None)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
     # ──────────────────────────────────────────────────────────────
     # PUBLIC: transform_organic()

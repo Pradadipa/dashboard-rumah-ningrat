@@ -283,33 +283,71 @@ Rules:
     # SECTION 2: Metric Stack
     # ──────────────────────────────────────────────────────────────
 
+    # Instagram ER benchmark berdasarkan followers (2026)
+    IG_ER_TIERS = [
+        (1_000,      4.26, 5.60, "Nano <1K"),
+        (5_000,      4.26, 5.60, "Micro 1K-5K"),
+        (20_000,     2.28, 2.43, "Small 5K-20K"),
+        (100_000,    1.62, 2.15, "Mid 20K-100K"),
+        (1_000_000,  1.50, 3.50, "Macro 100K-1M"),
+        (float('inf'), 1.54, 1.97, "Mega 1M+"),
+    ]
+
+    @staticmethod
+    def _ig_er_benchmark(followers: int) -> tuple:
+        """Return (good, excellent, tier_label) untuk Instagram ER."""
+        for max_f, good, exc, label in OrganicInsightGenerator.IG_ER_TIERS:
+            if followers <= max_f:
+                return good, exc, label
+        return 1.0, 2.0, "General"
+
     def generate_metric_stack(self) -> dict:
         """Insight untuk Metric Stack (ER, SoV, PCR, Consistency)."""
         cache_key = _make_cache_key(self.org_summary, 'metric_stack')
 
-        benchmarks = {'er': 5.0, 'sov': 2.0, 'pcr': 3.0, 'consistency': 80.0}
-        lines      = [f"Period: {self.since} to {self.until}\n",
-                      f"Benchmarks: ER>{benchmarks['er']}%, SoV>{benchmarks['sov']}%, "
-                      f"PCR>{benchmarks['pcr']}%, Consistency>{benchmarks['consistency']}%\n"]
+        DEFAULT_BENCHMARKS = {'sov': 2.0, 'pcr': 3.0, 'consistency': 80.0}
+        lines = [f"Period: {self.since} to {self.until}\n"]
 
         for platform, data in self.org_summary.items():
-            er_vs  = "ABOVE" if data['er_pct']          >= benchmarks['er']          else "BELOW"
-            sv_vs  = "ABOVE" if data['sov_pct']         >= benchmarks['sov']         else "BELOW"
-            pc_vs  = "ABOVE" if data['pcr_pct']         >= benchmarks['pcr']         else "BELOW"
-            cs_vs  = "ABOVE" if data['consistency_pct'] >= benchmarks['consistency'] else "BELOW"
+            # Benchmark ER dinamis untuk Instagram
+            if platform == "Instagram":
+                avg_followers = int(data.get('followers_end', 0))
+                er_good, er_exc, er_tier = self._ig_er_benchmark(avg_followers)
+                er_benchmark_note = (
+                    f"Instagram ER benchmark (2026, {er_tier} account, "
+                    f"{avg_followers:,} followers): "
+                    f"Good >{er_good:.2f}%, Excellent >{er_exc:.2f}%"
+                )
+            else:
+                er_good, er_exc = 5.0, 7.5
+                er_tier = "General"
+                er_benchmark_note = f"ER benchmark: Good >5.0%, Excellent >7.5%"
+
+            er_vs = (
+                "EXCELLENT" if data['er_pct'] >= er_exc else
+                "GOOD"      if data['er_pct'] >= er_good else
+                "BELOW"
+            )
+            sv_vs = "ABOVE" if data['sov_pct']         >= DEFAULT_BENCHMARKS['sov']         else "BELOW"
+            pc_vs = "ABOVE" if data['pcr_pct']         >= DEFAULT_BENCHMARKS['pcr']         else "BELOW"
+            cs_vs = "ABOVE" if data['consistency_pct'] >= DEFAULT_BENCHMARKS['consistency'] else "BELOW"
 
             lines.append(
                 f"{platform}:\n"
+                f"  {er_benchmark_note}\n"
                 f"  Engagement Rate    : {data['er_pct']:.2f}% ({er_vs} benchmark)\n"
-                f"  Share of Voice     : {data['sov_pct']:.2f}% ({sv_vs} benchmark)\n"
-                f"  Profile Conv. Rate : {data['pcr_pct']:.2f}% ({pc_vs} benchmark)\n"
-                f"  Consistency Score  : {data['consistency_pct']:.1f}% ({cs_vs} benchmark)\n"
+                f"  Share of Voice     : {data['sov_pct']:.2f}% ({sv_vs} benchmark >2%)\n"
+                f"  Profile Conv. Rate : {data['pcr_pct']:.2f}% ({pc_vs} benchmark >3%)\n"
+                f"  Consistency Score  : {data['consistency_pct']:.1f}% ({cs_vs} benchmark >80%)\n"
                 f"  Total engagement   : {_fmt_num(data['likes']+data['comments']+data['shares'])}\n"
+                f"  Followers          : {data.get('followers_end', 0):,}\n"
             )
 
         user_prompt = (
             "Analyze the engagement metrics vs benchmarks:\n\n"
             + "\n".join(lines) +
+            "\nIMPORTANT: For Instagram, use the follower-tier specific benchmarks "
+            "provided above (2026 industry data), NOT a flat 5% benchmark. "
             "\nFocus on: which metrics are most off-target, root cause analysis, "
             "and the highest-impact action to improve performance."
         )
