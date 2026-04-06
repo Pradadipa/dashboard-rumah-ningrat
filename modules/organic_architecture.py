@@ -345,14 +345,6 @@ def render_content_grid(page_df: pd.DataFrame):
                                 <div class="card-metric-label">Clicks</div>
                             </div>
                         </div>
-                        <div class="card-scores">
-                            <div class="score-badge score-badge-virality" style="color:{vs_color};">
-                                🔥 Virality: {vs:.1f}%
-                            </div>
-                            <div class="score-badge score-badge-conversion" style="color:{cs_color};">
-                                🎯 Conv: {cs:.1f}%
-                            </div>
-                        </div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -459,8 +451,6 @@ def render_content_table(page_df: pd.DataFrame, current_sort: str):
             {metric_cell(post.get('comments',0))}
             {metric_cell(post.get('shares',0))}
             {metric_cell(post.get('saves',0))}
-            {score_cell(post.get('virality_score',0))}
-            {score_cell(post.get('conversion_score',0))}
             {link_cell}
         </tr>"""
 
@@ -482,8 +472,6 @@ def render_content_table(page_df: pd.DataFrame, current_sort: str):
         {th('Comments','comments','right')}
         {th('Shares','shares','right')}
         {th('Saves','saves','right')}
-        {th('Virality','virality_score','right')}
-        {th('Conv.','conversion_score','right')}
         <th style="{TH}"></th>
     </tr>"""
 
