@@ -188,7 +188,7 @@ def render_north_star(df: pd.DataFrame, portfolio: str):
     metrics = [
         ("Total Spend",   fmt_idr(total_spend),           "Ad budget used",       NEON_BLUE),
         ("Impressions",   fmt_num(total_impressions),      "Total ad views",       NEON_PURPLE),
-        ("Clicks",        fmt_num(total_clicks),           "Total link clicks",    NEON_GREEN),
+        ("Clicks (Outbound)",        fmt_num(total_clicks),           "Total link clicks (Outbound)",    NEON_GREEN),
         ("Avg CTR",       f"{avg_ctr:.2f}%",              "Click-through rate",   NEON_YELLOW
          if avg_ctr >= 1.5 else NEON_RED),
         ("Avg CPM",       fmt_idr(avg_cpm),               "Cost per 1K views",    TEXT_SECONDARY),

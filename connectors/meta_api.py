@@ -154,6 +154,16 @@ class MetaAdsConnector:
         """
         Fetch daily campaign insights dalam date range.
 
+        Menggunakan Outbound Clicks (bukan All Clicks):
+        - clicks   = outbound_clicks (klik yang keluar ke landing page / website)
+        - ctr      = outbound_clicks_ctr (CTR berbasis outbound clicks)
+        - cpc      = spend / outbound_clicks (dihitung manual, lebih akurat)
+
+        Perbedaan All Clicks vs Outbound Clicks:
+        - All Clicks   : termasuk klik ke profil, like button, expand gambar, dll
+        - Outbound     : HANYA klik yang benar-benar keluar ke luar Facebook/Instagram
+                         → lebih relevan untuk lead gen / properti
+
         Args:
             since: 'YYYY-MM-DD'
             until: 'YYYY-MM-DD'
@@ -175,11 +185,10 @@ class MetaAdsConnector:
             AdsInsights.Field.date_stop,
             AdsInsights.Field.impressions,
             AdsInsights.Field.reach,
-            AdsInsights.Field.clicks,
+            AdsInsights.Field.outbound_clicks,          # Outbound Clicks (bukan all clicks)
+            AdsInsights.Field.outbound_clicks_ctr,      # CTR berbasis outbound clicks
             AdsInsights.Field.spend,
             AdsInsights.Field.cpm,
-            AdsInsights.Field.cpc,
-            AdsInsights.Field.ctr,
             AdsInsights.Field.actions,
             AdsInsights.Field.action_values,
             AdsInsights.Field.purchase_roas,
@@ -192,10 +201,25 @@ class MetaAdsConnector:
             action_values = row.get('action_values', [])
             roas_list     = row.get('purchase_roas', [])
 
-            purchases = next((float(a['value']) for a in actions if a['action_type'] == 'purchase'), 0)
+            # ── Outbound Clicks ──────────────────────────────────────
+            # outbound_clicks adalah list: [{'action_type': 'outbound_click', 'value': 'N'}]
+            outbound_list = row.get('outbound_clicks', [])
+            clicks        = int(float(outbound_list[0]['value'])) if outbound_list else 0
+
+            # ── Outbound CTR ─────────────────────────────────────────
+            # outbound_clicks_ctr adalah list: [{'action_type': 'outbound_click', 'value': 'N'}]
+            ctr_list = row.get('outbound_clicks_ctr', [])
+            ctr      = round(float(ctr_list[0]['value']), 4) if ctr_list else 0.0
+
+            # ── CPC Manual (Spend / Outbound Clicks) ─────────────────
+            # Tidak bisa pakai field cpc bawaan Meta karena itu berbasis all clicks
+            spend = float(row.get('spend', 0))
+            cpc   = round(spend / clicks, 2) if clicks > 0 else 0.0
+
+            # ── Purchase metrics ─────────────────────────────────────
+            purchases = next((float(a['value']) for a in actions       if a['action_type'] == 'purchase'), 0)
             revenue   = next((float(a['value']) for a in action_values if a['action_type'] == 'purchase'), 0)
             roas      = float(roas_list[0]['value']) if roas_list else 0
-            spend     = float(row.get('spend', 0))
 
             rows.append({
                 'portfolio'    : self.config.name,
@@ -204,11 +228,11 @@ class MetaAdsConnector:
                 'campaign_id'  : row.get('campaign_id'),
                 'impressions'  : int(row.get('impressions', 0)),
                 'reach'        : int(row.get('reach', 0)),
-                'clicks'       : int(row.get('clicks', 0)),
+                'clicks'       : clicks,          # Outbound Clicks
                 'spend'        : round(spend, 2),
                 'cpm'          : round(float(row.get('cpm', 0)), 2),
-                'cpc'          : round(float(row.get('cpc', 0)), 2),
-                'ctr'          : round(float(row.get('ctr', 0)), 2),
+                'cpc'          : cpc,             # Spend / Outbound Clicks
+                'ctr'          : ctr,             # Outbound CTR
                 'purchases'    : int(purchases),
                 'revenue'      : round(revenue, 2),
                 'roas'         : round(roas, 2),

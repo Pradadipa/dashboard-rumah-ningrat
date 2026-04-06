@@ -238,50 +238,69 @@ def render_content_grid(page_df: pd.DataFrame):
     """Render content sebagai visual grid cards."""
     cols_per_row = 3
     rows_needed  = (len(page_df) + cols_per_row - 1) // cols_per_row
-
+ 
     for row_idx in range(rows_needed):
         cols = st.columns(cols_per_row)
         for col_idx in range(cols_per_row):
             item_idx = row_idx * cols_per_row + col_idx
             if item_idx >= len(page_df):
                 break
-
+ 
             post     = page_df.iloc[item_idx]
             platform = post.get('platform', 'Unknown')
             color    = PLATFORM_COLORS.get(platform, "#FFFFFF")
             icon     = PLATFORM_ICONS.get(platform, "📄")
-
+ 
             r = int(color[1:3], 16)
             g = int(color[3:5], 16)
             b = int(color[5:7], 16)
             gradient = f"linear-gradient(135deg, rgba({r},{g},{b},0.3) 0%, rgba({r},{g},{b},0.08) 100%)"
-
+ 
             vs       = float(post.get('virality_score', 0))
             cs       = float(post.get('conversion_score', 0))
             vs_color = NEON_GREEN if vs >= 3.0 else (NEON_YELLOW if vs >= 1.5 else NEON_RED)
             cs_color = NEON_GREEN if cs >= 3.0 else (NEON_YELLOW if cs >= 1.5 else NEON_RED)
-
+ 
             # Thumbnail atau placeholder
+            # TikTok: selalu placeholder — thumbnail berisi link konten, tidak bisa di-embed sebagai gambar
             thumbnail = post.get('thumbnail', '')
-            if thumbnail and str(thumbnail) not in ['nan', '']:
+            is_tiktok = platform == 'TikTok'
+            has_thumb = (
+                not is_tiktok
+                and thumbnail
+                and str(thumbnail) not in ['nan', '', 'None']
+                and str(thumbnail).startswith('http')
+                and 'tiktok.com' not in str(thumbnail)
+            )
+            if has_thumb:
                 thumb_html = f'<img src="{thumbnail}" style="width:100%;height:160px;object-fit:cover;border-radius:8px 8px 0 0;">'
             else:
-                thumb_html = f'''
-                <div style="width:100%;height:160px;background:{gradient};
-                            border-radius:8px 8px 0 0;display:flex;
-                            align-items:center;justify-content:center;font-size:40px;">
-                    {icon}
-                </div>'''
-
+                content_type = str(post.get('content_type', '')).upper()
+                type_label   = {
+                    'VIDEO': '▶ Video', 'REELS': '▶ Reels',
+                    'IMAGE': '🖼 Photo', 'CAROUSEL': '🖼 Carousel',
+                }.get(content_type, '')
+                thumb_html = (
+                    f'<div style="width:100%;height:160px;'
+                    f'background:linear-gradient(135deg,rgba({r},{g},{b},0.25) 0%,rgba({r},{g},{b},0.06) 100%);'
+                    f'border-radius:8px 8px 0 0;display:flex;flex-direction:column;'
+                    f'align-items:center;justify-content:center;gap:8px;">'
+                    f'<div style="font-size:44px;line-height:1;">{icon}</div>'
+                    f'<div style="font-size:11px;color:rgba(255,255,255,0.45);'
+                    f'font-weight:600;letter-spacing:1px;">{type_label}</div>'
+                    f'</div>'
+                )
+ 
+ 
             # Format date
             date_val = post.get('date', '')
             if hasattr(date_val, 'strftime'):
                 date_str = date_val.strftime('%d %b %Y')
             else:
                 date_str = str(date_val)[:10]
-
+ 
             title = str(post.get('title', 'Untitled Post'))[:60]
-
+ 
             with cols[col_idx]:
                 st.markdown(f"""
                 <div class="content-card">
@@ -326,6 +345,14 @@ def render_content_grid(page_df: pd.DataFrame):
                                 <div class="card-metric-label">Clicks</div>
                             </div>
                         </div>
+                        <div class="card-scores">
+                            <div class="score-badge score-badge-virality" style="color:{vs_color};">
+                                🔥 Virality: {vs:.1f}%
+                            </div>
+                            <div class="score-badge score-badge-conversion" style="color:{cs_color};">
+                                🎯 Conv: {cs:.1f}%
+                            </div>
+                        </div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -333,7 +360,7 @@ def render_content_grid(page_df: pd.DataFrame):
 
 
 def render_content_table(page_df: pd.DataFrame, current_sort: str):
-    """Render content sebagai tabel dengan thumbnail."""
+    """Render content table — batch rows untuk avoid truncation & layout break."""
 
     sort_active_map = {
         "Virality Score ↓"  : "virality_score",
@@ -344,56 +371,137 @@ def render_content_table(page_df: pd.DataFrame, current_sort: str):
     }
     active_sort_col = sort_active_map.get(current_sort)
 
-    columns = [
-        {"key": "title"           , "label": "Content"   },
-        {"key": "views"           , "label": "Views"     },
-        {"key": "likes"           , "label": "Likes"     },
-        {"key": "comments"        , "label": "Comments"  },
-        {"key": "shares"          , "label": "Shares"    },
-        {"key": "saves"           , "label": "Saves"     },
-        {"key": "virality_score"  , "label": "Virality"  },
-        {"key": "conversion_score", "label": "Conv."     },
-    ]
+    def metric_cell(val):
+        try:
+            v = int(float(val)) if val and str(val) not in ['nan','None',''] else 0
+        except (TypeError, ValueError):
+            v = 0
+        if v == 0:
+            return '<td style="text-align:right;color:#2d3748;padding:9px 12px;">—</td>'
+        return f'<td style="text-align:right;font-size:14px;font-weight:600;color:#f1f5f9;padding:9px 12px;">{format_number(v)}</td>'
 
-    header_cells = ""
-    for col in columns:
-        active_class = " active" if col["key"] == active_sort_col else ""
-        arrow        = " ↓" if col["key"] == active_sort_col else ""
-        header_cells += f'<div class="table-header-cell{active_class}">{col["label"]}{arrow}</div>'
-    st.markdown(f'<div class="table-header">{header_cells}</div>', unsafe_allow_html=True)
+    def score_cell(val):
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v >= 3.0:
+            color, bg = '#00ff88', 'rgba(0,255,136,.12)'
+        elif v >= 1.5:
+            color, bg = '#ffd700', 'rgba(255,215,0,.12)'
+        elif v > 0:
+            color, bg = '#ff6b6b', 'rgba(255,107,107,.12)'
+        else:
+            return '<td style="text-align:right;padding:9px 12px;"><span style="color:#2d3748;font-size:12px;">—</span></td>'
+        return (f'<td style="text-align:right;padding:9px 12px;">'
+                f'<span style="display:inline-block;padding:3px 9px;border-radius:20px;'
+                f'font-size:12px;font-weight:700;color:{color};background:{bg};">'
+                f'{v:.1f}%</span></td>')
 
-    for _, post in page_df.iterrows():
-        platform = post.get('platform', 'Unknown')
-        color    = PLATFORM_COLORS.get(platform, "#FFFFFF")
-        icon     = PLATFORM_ICONS.get(platform, "📄")
+    def build_row(post) -> str:
+        """Build 1 row HTML string."""
+        platform  = str(post.get('platform', 'Unknown'))
+        color     = PLATFORM_COLORS.get(platform, '#888')
+        icon      = PLATFORM_ICONS.get(platform, '📄')
+        thumbnail = str(post.get('thumbnail', ''))
+        title     = str(post.get('title', 'Untitled Post'))[:80]
+        ctype     = str(post.get('content_type', ''))
+        permalink = str(post.get('permalink', ''))
 
-        vs       = float(post.get('virality_score', 0))
-        cs       = float(post.get('conversion_score', 0))
-        vs_color = NEON_GREEN if vs >= 3.0 else (NEON_YELLOW if vs >= 1.5 else TEXT_PRIMARY)
-        cs_color = NEON_GREEN if cs >= 3.0 else (NEON_YELLOW if cs >= 1.5 else TEXT_PRIMARY)
+        date_val = post.get('date', '')
+        date_str = date_val.strftime('%d %b %Y') if hasattr(date_val, 'strftime') \
+                   else str(date_val)[:10]
 
-        title = str(post.get('title', 'Untitled Post'))[:60]
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
 
-        st.markdown(f"""
-        <div class="table-row">
-            <div class="table-cell-title">
-                <span class="table-platform-dot" style="background:{color};"></span>
-                <span style="font-size:11px;">{icon}</span>
-                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-                             font-size:13px;margin-left:12px;">{title}</span>
-                <span style="font-size:9px;color:#5A6577;margin-left:4px;">
-                    {post.get('content_type','')}
-                </span>
-            </div>
-            <div>{format_number(post.get('views',0))}</div>
-            <div>{format_number(post.get('likes',0))}</div>
-            <div>{format_number(post.get('comments',0))}</div>
-            <div>{format_number(post.get('shares',0))}</div>
-            <div>{format_number(post.get('saves',0))}</div>
-            <div class="table-cell-score" style="color:{vs_color};">{vs:.1f}%</div>
-            <div class="table-cell-score" style="color:{cs_color};">{cs:.1f}%</div>
+        is_valid_thumb = (thumbnail and thumbnail not in ['nan','','None']
+                          and thumbnail.startswith('http'))
+        thumb_html = (
+            f'<img src="{thumbnail}" style="width:48px;height:48px;'
+            f'border-radius:8px;object-fit:cover;display:block;">'
+            if is_valid_thumb else
+            f'<div style="width:48px;height:48px;border-radius:8px;'
+            f'background:rgba({r},{g},{b},.15);display:flex;align-items:center;'
+            f'justify-content:center;font-size:20px;">{icon}</div>'
+        )
+
+        badge = (
+            f'<span style="display:inline-flex;align-items:center;gap:3px;'
+            f'padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;'
+            f'margin-bottom:4px;background:rgba({r},{g},{b},.18);color:{color};">'
+            f'{icon} {platform}</span>'
+        )
+
+        is_valid_link = (permalink and permalink not in ['nan','','None']
+                         and permalink.startswith('http'))
+        link_cell = (
+            f'<td style="padding:9px 12px;">'
+            f'<a href="{permalink}" target="_blank" style="color:#38bdf8;'
+            f'text-decoration:none;font-size:11px;opacity:.7;">&#8599; Open</a></td>'
+            if is_valid_link else '<td style="padding:9px 12px;"></td>'
+        )
+
+        return f"""
+        <tr style="border-bottom:1px solid #1a2035;">
+            <td style="padding:8px 8px 8px 14px;vertical-align:middle;">{thumb_html}</td>
+            <td style="min-width:200px;max-width:300px;padding:9px 12px;vertical-align:middle;">
+                {badge}
+                <div style="font-size:13px;font-weight:500;color:#f1f5f9;
+                            line-height:1.4;word-break:break-word;">{title}</div>
+                <div style="font-size:10px;color:#4b5563;margin-top:2px;">
+                    {ctype}&nbsp;·&nbsp;{date_str}
+                </div>
+            </td>
+            {metric_cell(post.get('views',0))}
+            {metric_cell(post.get('likes',0))}
+            {metric_cell(post.get('comments',0))}
+            {metric_cell(post.get('shares',0))}
+            {metric_cell(post.get('saves',0))}
+            {score_cell(post.get('virality_score',0))}
+            {score_cell(post.get('conversion_score',0))}
+            {link_cell}
+        </tr>"""
+
+    # ── Build header ──────────────────────────────────────────────
+    TH = ('padding:11px 12px;text-align:left;font-size:10px;font-weight:600;'
+          'color:#6b7280;text-transform:uppercase;letter-spacing:.8px;white-space:nowrap;')
+
+    def th(label, key=None, align='left'):
+        col = 'color:#38bdf8;' if key and key == active_sort_col else ''
+        arr = ' ↓' if key and key == active_sort_col else ''
+        return f'<th style="{TH}{col}text-align:{align};">{label}{arr}</th>'
+
+    header = f"""
+    <tr style="background:#111827;border-bottom:2px solid #1f2937;">
+        <th style="{TH}width:52px;padding-left:14px;"></th>
+        {th('Content')}
+        {th('Views','views','right')}
+        {th('Likes','likes','right')}
+        {th('Comments','comments','right')}
+        {th('Shares','shares','right')}
+        {th('Saves','saves','right')}
+        {th('Virality','virality_score','right')}
+        {th('Conv.','conversion_score','right')}
+        <th style="{TH}"></th>
+    </tr>"""
+
+    # ── Build semua rows sekaligus ────────────────────────────────
+    all_rows = ''.join(build_row(post) for _, post in page_df.iterrows())
+
+    # ── Render dalam 1 st.markdown() call ────────────────────────
+    st.markdown(f"""
+    <div style="border-radius:10px;border:1px solid #1f2937;
+                background:#0d1117;overflow:hidden;">
+        <div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                <thead>{header}</thead>
+                <tbody>{all_rows}</tbody>
+            </table>
         </div>
-        """, unsafe_allow_html=True)
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_pagination(current_page: int, total_pages: int):
