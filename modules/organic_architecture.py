@@ -326,14 +326,6 @@ def render_content_grid(page_df: pd.DataFrame):
                                 <div class="card-metric-label">Clicks</div>
                             </div>
                         </div>
-                        <div class="card-scores">
-                            <div class="score-badge score-badge-virality" style="color:{vs_color};">
-                                🔥 Virality: {vs:.1f}%
-                            </div>
-                            <div class="score-badge score-badge-conversion" style="color:{cs_color};">
-                                🎯 Conv: {cs:.1f}%
-                            </div>
-                        </div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
