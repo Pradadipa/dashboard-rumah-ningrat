@@ -34,4 +34,4 @@ credentials/*
 config.yaml
 
 # Abaikan generate_pass.py karena hanya digunakan untuk menghasilkan hash password sekali saja
-generate_pass.py
+../generate_pass.py
