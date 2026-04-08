@@ -38,8 +38,7 @@ def main():
     load_css()
     
     # --- 1. LOAD KONFIGURASI YAML ---
-    with open('config.yaml') as file:
-        config = yaml.load(file, Loader=SafeLoader)
+    config = st.secrets
 
     # --- 2. INISIALISASI AUTHENTICATOR ---
     authenticator = stauth.Authenticate(
