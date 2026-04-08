@@ -29,3 +29,9 @@ Thumbs.db
 
 # Credentials
 credentials/*
+
+# Mengabaikan file konfigurasi yang berisi password
+config.yaml
+
+# Abaikan generate_pass.py karena hanya digunakan untuk menghasilkan hash password sekali saja
+generate_pass.py
